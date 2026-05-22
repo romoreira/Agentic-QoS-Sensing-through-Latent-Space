@@ -1,5 +1,3 @@
-# README
-
 # BESS UPF QoS and Slice Priority Notes
 
 ## Purpose
