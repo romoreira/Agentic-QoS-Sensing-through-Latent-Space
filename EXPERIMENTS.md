@@ -1,3 +1,5 @@
+# README
+
 # Sinusoidal Slice MBR Control Baselines
 
 ## Goal
