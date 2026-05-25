@@ -12,6 +12,7 @@ from typing import Tuple
 # Slice TEIDs as deployed in the BESS-UPF
 SLICE_TEIDS: Tuple[int, int, int] = (1, 11, 21)  # gold, silver, bronze
 SLICE_NAMES: Tuple[str, str, str] = ("gold", "silver", "bronze")
+NOISE_SLICE_TEID: int = 31                # optional fourth stream on the same uplink
 N_SLICES: int = 3
 
 # Nominal MBR per slice in kbps (gold, silver, bronze). The action grid

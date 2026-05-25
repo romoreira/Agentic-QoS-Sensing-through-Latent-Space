@@ -1,145 +1,214 @@
 # upf-rl-env
 
-Gymnasium environment + DQN agent for slice-aware MBR control on a BESS-UPF.
+Gymnasium environment and DQN agent for slice-aware MBR control on a BESS-UPF.
 
-The env wraps a metric source (mock simulator by default; TRex/BESS stubs for
-real wiring) and an action applier (mock by default; real pfcpctl stub
-provided). Designed for the **RL-raw vs RL-latent** comparison: same
-algorithm, same hyperparameters, same action space — only the observation
-representation changes.
+This version keeps the testbed assumption simple and aligned with the working TRex profile already validated in the lab.
+
+- One TRex TX uplink port
+- Multiple GTP-U streams on that same port
+- One TEID per slice
+- DQN controls the MBR of Gold, Silver, and Bronze
+- A fourth Noise slice can be present on the same uplink to create hidden pressure
+- TRex readings are still mocked inside the RL environment
+- TensorBoard logs DQN metrics and current per-slice traffic metrics
 
 ## Quickstart
 
 ```bash
 pip install -e .
 
-# 1. Sanity check — random agent, prints stats, writes CSV
+# sanity check with random actions
 python scripts/sanity_check.py --steps 500 --verbose
 
-# 2. Train DQN (Double + Dueling + PER) on the mock env
-python scripts/train_dqn.py --total-steps 200000 --save-dir checkpoints/dqn_raw
+# train DQN on GPU, CUDA is now the default device for train_dqn.py
+python scripts/train_dqn.py \
+  --device cuda \
+  --total-steps 200000 \
+  --save-dir checkpoints/dqn_raw \
+  --log-csv-dir runs/dqn_raw \
+  --tb-dir runs/tensorboard/dqn_raw
 
-# 3. Evaluate a checkpoint
-python scripts/eval_dqn.py --ckpt checkpoints/dqn_raw/final.pt --episodes 5
+# open TensorBoard
+tensorboard --logdir runs/tensorboard
+
+# evaluate the checkpoint on GPU
+python scripts/eval_dqn.py \
+  --device cuda \
+  --ckpt checkpoints/dqn_raw/final.pt \
+  --episodes 5
 ```
 
-Python 3.10+ recommended. CPU works; CUDA used automatically if available.
+Python 3.10 or newer is recommended. CUDA is used when `--device cuda` is selected. Use `--device cpu` only for a CPU run.
 
-## Env ID
+## What changed in this package
 
-Registered as `upf-rl/SliceQoS-v0`. Use:
+The earlier traffic module assumed one TRex port per slice. That was removed from the runnable TRex path. The current TRex path follows the validated profile style.
 
-```python
-import gymnasium as gym
-import upf_rl_env  # noqa: F401  (registers the env)
-
-env = gym.make("upf-rl/SliceQoS-v0")
+```text
+TRex port 0
+  stream Gold    TEID 1
+  stream Silver  TEID 11
+  stream Bronze  TEID 21
+  stream Noise   TEID 31, optional fourth slice
 ```
 
-## Observation, Action, Reward
+The DQN still controls only three visible slices.
 
-- **Observation**: `Box(85,)` — 5 stacked windows × 17 features each, normalized.
-  Feature order documented in `src/upf_rl_env/features.py`.
-- **Action**: `Discrete(15)`. Per-slice MBR percentages from `action/space.py`.
-  Action 0 = full MBR; higher indices cut bronze first, then silver, then gold.
-- **Reward**: composite — weighted negative loss per slice + utilization bonus
-  − action-change penalty − SLA-violation penalty. See `reward.py`.
+| Slice  | TEID | Controlled by DQN | Nominal MBR kbps |
+|--------|-----:|------------------:|-----------------:|
+| Gold   |    1 | yes               |          200 000 |
+| Silver |   11 | yes               |          100 000 |
+| Bronze |   21 | yes               |           50 000 |
+| Noise  |   31 | no                | fixed in mock     |
 
-## Slice mapping
+## Observation, action, and reward
 
-| Slice  | TEID | Nominal MBR (kbps) |
-|--------|-----:|-------------------:|
-| Gold   |    1 |            200 000 |
-| Silver |   11 |            100 000 |
-| Bronze |   21 |             50 000 |
+- Observation, `Box(85)`, five stacked windows times seventeen features per window
+- Action, `Discrete(15)`, priority-aware MBR cuts, Bronze first, then Silver, then Gold
+- Reward, weighted slice loss penalty plus N6 utilization bonus minus action-change and Gold SLA penalties
 
-Change in `src/upf_rl_env/config.py` (`SLICE_TEIDS`, `NOMINAL_MBR_KBPS`).
+The feature order is defined in `src/upf_rl_env/features.py`.
 
-## Layers
+## Traffic challenge used by the mock source
 
+The mock source is the part that creates a meaningful DQN challenge while TRex/BESS readings are still stubs.
+
+Per slice, offered load combines three ingredients.
+
+1. Non-synchronized sinusoidal variation
+2. AR(1) noise
+3. Poisson bursts with lognormal magnitude and exponential decay
+
+A hidden regime switches every 8 to 25 seconds and changes the mean and amplitude of each slice. The agent does not observe the regime directly.
+
+The Noise slice is not included in the observation as a per-slice metric. It traverses the same simulated N6 capacity and appears indirectly through aggregate N6 utilization and loss pressure. This gives you a useful bridge to a future latent-space experiment, because a temporal encoder can try to infer hidden pressure from the last windows.
+
+## TensorBoard audit signals
+
+`train_dqn.py` writes TensorBoard scalars by default.
+
+Main groups.
+
+```text
+dqn/loss
+dqn/q_mean
+dqn/td_abs_mean
+dqn/epsilon
+traffic/offered_gold_mbps
+traffic/offered_silver_mbps
+traffic/offered_bronze_mbps
+traffic/rx_gold_mbps
+traffic/rx_silver_mbps
+traffic/rx_bronze_mbps
+traffic/loss_gold
+traffic/loss_silver
+traffic/loss_bronze
+traffic/n6_tx_mbps
+traffic/n6_utilization
+mbr/gold_kbps
+mbr/silver_kbps
+mbr/bronze_kbps
+hidden/noise_offered_mbps
+hidden/n6_capacity_mbps
+hidden/regime
+reward_components/r_gold
+reward_components/r_silver
+reward_components/r_bronze
+reward_components/r_util
+reward_components/r_change
+reward_components/r_sla
+eval/return_mean
+eval/gold_loss_mean
+eval/sla_viol_rate
 ```
+
+The `hidden/*` scalars are for audit only. They are not included in the DQN observation.
+
+## Preview the mock noise before training
+
+```bash
+python scripts/preview_noise.py \
+  --steps 3000 \
+  --seed 42 \
+  --out runs/noise_preview.csv
+```
+
+This writes visible offered loads, hidden Noise offered load, N6 capacity, utilization, and losses. It helps verify that the training signal is not trivial before spending time on GPU training.
+
+## Running the TRex profile
+
+Start TRex and run the single-uplink stream set.
+
+```bash
+cd /opt/trex/v3.08
+sudo ./t-rex-64 -i --stl
+
+export PYTHONPATH=/opt/trex/v3.08/automation/trex_control_plane/interactive:$PYTHONPATH
+cd /path/to/upf-rl-env
+python scripts/run_trex_traffic.py --port 0 --duration 600
+```
+
+Useful variants.
+
+```bash
+# disable the fourth Noise stream
+python scripts/run_trex_traffic.py --port 0 --no-noise
+
+# reduce or increase all stream rates without editing the profile
+python scripts/run_trex_traffic.py --port 0 --pps-scale 0.75
+python scripts/run_trex_traffic.py --port 0 --pps-scale 1.25
+```
+
+The packet shape follows the working exp2 profile.
+
+```text
+Ether / IP(src=192.168.70.2,dst=192.168.70.1)
+      / UDP(sport=2152,dport=2152)
+      / GTP_U_Header(teid=<slice_teid>)
+      / IP(src=<ue_ip>,dst=192.168.80.2)
+      / UDP(sport=<slice_port>,dport=5555)
+      / payload
+```
+
+## Project layout
+
+```text
 src/upf_rl_env/
-  env.py              SliceQoSEnv — Gymnasium API
-  features.py         metrics_to_features (17 dims/window)
-  reward.py           compute_reward
-  config.py           EnvConfig, DQNConfig, slice constants
-  action/
-    space.py          15-action grid (gold_pct, silver_pct, bronze_pct)
-    applier.py        MockActionApplier (no-op) + RealActionApplier (pfcpctl stub)
-  sources/
-    base.py           MetricSource ABC + WindowMetrics dataclass
-    mock.py           MockMetricSource — full simulator (default)
-    trex.py           TrexMetricSource — stub
-    bess.py           BessMetricSource — stub (bessctl / pfcpiface)
-  monitor/
-    logger.py         MetricsLogger — async CSV writer
+  env.py              Gymnasium environment
+  features.py         17 features per telemetry window
+  reward.py           Reward components
+  config.py           Slice IDs, MBRs, env and DQN configs
+  action/space.py     15-action MBR grid
+  sources/mock.py     Mock source with visible slices plus hidden Noise pressure
+  sources/trex.py     Stub for future TRex metric source
+  sources/bess.py     Stub for future BESS metric source
+  monitor/logger.py   CSV metrics logger
+
+src/upf_rl_traffic/
+  dynamics.py         Shared traffic/noise generator used by the mock source
+  trex_profile.py     Single-uplink TRex profile, one port and multiple TEIDs
+  trex_conductor.py   Minimal runner for that profile
 
 src/upf_rl_agents/
-  dqn.py              DQNAgent (Double + Dueling + PER)
-  networks.py         DuelingMLP, PlainMLP
-  replay.py           PrioritizedReplayBuffer (sum-tree)
+  dqn.py              Double DQN with dueling network and PER
+  networks.py         Q-network definitions
+  replay.py           Prioritized replay buffer
 
 scripts/
-  sanity_check.py     Random agent → smoke test
-  train_dqn.py        Train DQN
-  eval_dqn.py         Eval a checkpoint
+  sanity_check.py
+  train_dqn.py
+  eval_dqn.py
+  preview_noise.py
+  run_trex_traffic.py
 ```
 
-## What the mock simulates
+## Real TRex/BESS integration status
 
-Mock metric source is the most opinionated piece — it determines whether
-RL has anything nontrivial to learn. The dynamics combine:
+The real metric path remains intentionally stubbed. The current training loop uses `MockMetricSource`, which produces the same `WindowMetrics` shape expected from a real TRex+BESS reader later.
 
-- **Per-slice offered load**: sum of sinusoids (3 freqs) + AR(1) noise +
-  Poisson bursts with lognormal magnitude and exponential decay.
-- **Regime variable** (4 regimes, switches every 8–25 s) that modulates
-  per-slice means and amplitudes. *Hidden from the agent.*
-- **Hidden N6 background traffic** (AR(1) around 40 Mbps).
-- **N6 capacity** as a slow random walk (~300 Mbps nominal).
-- **Enforcement**: stage A is MBR (drops counted as `qer_red`); stage B
-  is N6 sharing with strict Gold > Silver > Bronze priority on the
-  remaining headroom after background.
+When real wiring is added, keep these contracts.
 
-An agent that ignores temporal context can do well only in the all-quiet
-regime. The hidden background + capacity drift is the signal a latent
-encoder should pick up later.
-
-## Plugging real TRex / BESS
-
-The env constructor takes a `MetricSource` and an `ActionApplier`. To go
-from mock to real:
-
-```python
-from upf_rl_env import SliceQoSEnv, EnvConfig
-from upf_rl_env.action.applier import RealActionApplier
-from upf_rl_env.sources.bess import BessMetricSource
-from upf_rl_env.config import NOMINAL_MBR_KBPS, SLICE_TEIDS
-
-env = SliceQoSEnv(
-    config=EnvConfig(realtime=True),  # pace to 200 ms wall-clock
-    metric_source=BessMetricSource(slice_teids=SLICE_TEIDS),
-    action_applier=RealActionApplier(
-        slice_teids=SLICE_TEIDS,
-        nominal_mbr_kbps=NOMINAL_MBR_KBPS,
-    ),
-)
-```
-
-The stubs raise `NotImplementedError` until you fill in the TODOs — the
-exact pfcpctl command, the bessctl module names, and the QER discovery
-logic depend on which UPF-BESS flavor you deployed. See comments in
-`sources/trex.py`, `sources/bess.py`, `action/applier.py`.
-
-You will likely want a *compound* source that reads offered load from
-TRex and post-enforcement metrics from BESS, joined by timestamp. Easy
-to write as a small wrapper over `MetricSource` once both stubs work.
-
-## Notes / known limitations
-
-- Mock is fast (no wall-clock pacing). Real testbed should set
-  `EnvConfig.realtime=True` so `step()` waits for the window to elapse.
-- `truncated` flags do not produce a real terminal — `agent.observe()`
-  passes `terminated` only (correct bootstrapping).
-- PER uses a sum tree; `replay_capacity=200_000` × `obs_dim=85` keeps
-  the buffer under ~70 MB of RAM.
-- Logger writes one CSV per episode (suffix `_epNNNN.csv`).
+- TRex offered load, per TEID for Gold, Silver, Bronze
+- BESS or UPF post-enforcement RX and QER red/drop counters, per controlled TEID
+- Aggregate N6 utilization
+- The fourth Noise slice may be sent by TRex but does not need to be exposed as a controlled slice to the agent

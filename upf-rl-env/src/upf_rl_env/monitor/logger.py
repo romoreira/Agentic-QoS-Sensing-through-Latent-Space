@@ -98,5 +98,7 @@ METRICS_FIELDNAMES = [
     "mbr_bronze_kbps",
     "action",
     "reward",
-    "regime",  # ground truth (mock only) — empty when not available
+    "regime",  # ground truth (mock only), empty when not available
+    "noise_offered_mbps",
+    "n6_capacity_mbps",
 ]

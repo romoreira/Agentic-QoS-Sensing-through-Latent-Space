@@ -11,6 +11,7 @@ dependencies = [
     "gymnasium>=0.29",
     "numpy>=1.24",
     "torch>=2.0",
+    "tensorboard>=2.14",
     "scipy>=1.10",
 ]
 

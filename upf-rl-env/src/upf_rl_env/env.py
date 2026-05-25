@@ -172,11 +172,14 @@ class SliceQoSEnv(gym.Env):
 
         # Log row
         if self._mlogger is not None:
+            hidden = info.get("hidden_state", {})
             row = {
                 "step": self._step_in_episode,
                 "action": action,
                 "reward": reward,
-                "regime": info.get("hidden_state", {}).get("regime", ""),
+                "regime": hidden.get("regime", ""),
+                "noise_offered_mbps": hidden.get("hidden_offered_mbps", ""),
+                "n6_capacity_mbps": hidden.get("n6_capacity_mbps", ""),
             }
             row.update(m.as_dict())
             self._mlogger.log(row)

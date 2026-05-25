@@ -10,6 +10,7 @@ import os
 
 import gymnasium as gym
 import numpy as np
+import torch
 
 import upf_rl_env  # registers env
 from upf_rl_env.config import DQNConfig
@@ -22,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--episodes", type=int, default=5)
     p.add_argument("--seed-base", type=int, default=10_000)
     p.add_argument("--log-csv-dir", type=str, default="runs/eval")
-    p.add_argument("--device", type=str, default="auto")
+    p.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu", "auto"])
     return p.parse_args()
 
 
@@ -39,10 +40,16 @@ def main() -> None:
     obs_dim = int(np.prod(env.observation_space.shape))  # type: ignore[arg-type]
     n_actions = int(env.action_space.n)                   # type: ignore[arg-type]
 
-    cfg = DQNConfig(device=args.device)
+    device = args.device
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("CUDA was requested, but torch.cuda.is_available() is False. Use --device cpu only for a CPU run.")
+
+    cfg = DQNConfig(device=device)
     agent = DQNAgent(obs_dim=obs_dim, n_actions=n_actions, cfg=cfg)
     agent.load(args.ckpt)
-    log.info("loaded %s", args.ckpt)
+    log.info("loaded %s on device=%s", args.ckpt, agent.device)
 
     returns, gold_losses, sla_viols, utils = [], [], [], []
     for ep in range(args.episodes):
