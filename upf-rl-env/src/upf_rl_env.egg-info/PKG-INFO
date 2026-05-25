@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: upf-rl-env
+Version: 0.1.0
+Summary: Gymnasium env + DQN agent for slice-aware MBR control on BESS-UPF
+Requires-Python: >=3.10
+Requires-Dist: gymnasium>=0.29
+Requires-Dist: numpy>=1.24
+Requires-Dist: torch>=2.0
+Requires-Dist: scipy>=1.10
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: ruff>=0.1; extra == "dev"
