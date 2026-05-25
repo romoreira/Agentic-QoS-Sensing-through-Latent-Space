@@ -32,6 +32,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from traffic_model import (
     FourSliceTrafficModel,
     TrafficModelConfig,
+    make_traffic_model,
     SLICE_NAMES,
     SLICE_TEIDS,
     SLICE_UE_IPS,
@@ -116,6 +117,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--duration", type=float, default=180.0)
     p.add_argument("--dt", type=float, default=1.0, help="rate update window in seconds")
     p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--traffic-model", default="stochastic", choices=["stochastic", "sine_abrupt"], help="traffic generator: stochastic AR/burst regime or clean sinusoids + abrupt noise")
     p.add_argument("--wire-overhead-bytes", type=int, default=20)
     p.add_argument("--csv", default="runs/trex_dynamic_targets.csv")
     p.add_argument("--jsonl", default="runs/trex_dynamic_targets.jsonl")
@@ -127,8 +129,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    cfg = TrafficModelConfig(dt_s=args.dt)
-    model = FourSliceTrafficModel(cfg, seed=args.seed)
+    model = make_traffic_model(args.traffic_model, dt_s=args.dt, seed=args.seed)
     Path(args.csv).parent.mkdir(parents=True, exist_ok=True)
     Path(args.jsonl).parent.mkdir(parents=True, exist_ok=True)
     writer = make_writer(args.tb)

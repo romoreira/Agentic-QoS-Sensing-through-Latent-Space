@@ -126,3 +126,105 @@ class FourSliceTrafficModel:
         n = int(math.ceil(duration_s / self.cfg.dt_s))
         for _ in range(n):
             yield self.sample()
+
+
+@dataclass
+class SineAbruptTrafficModelConfig:
+    """Cleaner traffic pattern for visual auditing and DQN curriculum.
+
+    Gold, Silver and Bronze are smooth non-synchronized sinusoids. Noise is a
+    fourth background slice with abrupt on/off pressure. This is intentionally
+    easier to inspect in TensorBoard than the stochastic model.
+    """
+    dt_s: float = 1.0
+    controlled_means_mbps: Sequence[float] = (145.0, 85.0, 38.0)
+    controlled_amps_mbps: Sequence[float] = (45.0, 32.0, 14.0)
+    controlled_periods_s: Sequence[float] = (300.0, 420.0, 260.0)
+    controlled_phases_rad: Sequence[float] = (0.0, 2.094, 4.188)
+    controlled_jitter_mbps: float = 0.8
+    noise_base_mbps: float = 20.0
+    noise_active_min_mbps: float = 70.0
+    noise_active_max_mbps: float = 140.0
+    noise_quiet_dwell_s: Sequence[float] = (90.0, 180.0)
+    noise_active_dwell_s: Sequence[float] = (20.0, 60.0)
+    noise_jitter_mbps: float = 3.0
+    max_offered_mbps: float = 400.0
+    min_offered_mbps: float = 0.0
+
+
+class SineAbruptTrafficModel:
+    """Smooth sine waves for controlled slices and abrupt background noise.
+
+    Order and sample format match FourSliceTrafficModel.
+    - gold, silver, bronze: non-synchronized sine curves
+    - noise: step-like background bursts, hidden from DQN features but logged for audit
+    """
+
+    def __init__(self, cfg: Optional[SineAbruptTrafficModelConfig] = None, seed: Optional[int] = None) -> None:
+        self.cfg = cfg or SineAbruptTrafficModelConfig()
+        self.rng = random.Random(seed)
+        self.step_idx = 0
+        self.t_s = 0.0
+        self.noise_active = False
+        self.noise_until_s = self._sample_noise_until()
+        self.noise_level = self.cfg.noise_base_mbps
+
+    def _sample_noise_until(self) -> float:
+        cfg = self.cfg
+        dwell = cfg.noise_active_dwell_s if self.noise_active else cfg.noise_quiet_dwell_s
+        return self.t_s + self.rng.uniform(float(dwell[0]), float(dwell[1]))
+
+    def _maybe_switch_noise(self) -> None:
+        if self.t_s < self.noise_until_s:
+            return
+        self.noise_active = not self.noise_active
+        cfg = self.cfg
+        if self.noise_active:
+            self.noise_level = self.rng.uniform(cfg.noise_active_min_mbps, cfg.noise_active_max_mbps)
+        else:
+            self.noise_level = cfg.noise_base_mbps
+        self.noise_until_s = self._sample_noise_until()
+
+    def sample(self) -> TrafficSample:
+        self._maybe_switch_noise()
+        cfg = self.cfg
+        mbps: Dict[str, float] = {}
+
+        for i, name in enumerate(SLICE_NAMES[:3]):
+            mean = cfg.controlled_means_mbps[i]
+            amp = cfg.controlled_amps_mbps[i]
+            period = max(float(cfg.controlled_periods_s[i]), 1e-9)
+            phase = cfg.controlled_phases_rad[i]
+            value = mean + amp * math.sin(2.0 * math.pi * self.t_s / period + phase)
+            if cfg.controlled_jitter_mbps > 0:
+                value += self.rng.gauss(0.0, cfg.controlled_jitter_mbps)
+            mbps[name] = float(max(cfg.min_offered_mbps, min(cfg.max_offered_mbps, value)))
+
+        noise = self.noise_level + self.rng.gauss(0.0, cfg.noise_jitter_mbps)
+        mbps["noise"] = float(max(cfg.min_offered_mbps, min(cfg.max_offered_mbps, noise)))
+
+        # regime 0 = quiet noise, regime 1 = abrupt noise pressure
+        regime = 1 if self.noise_active else 0
+        sample = TrafficSample(step=self.step_idx, t_s=self.t_s, regime=regime, mbps=mbps)
+        self.step_idx += 1
+        self.t_s += cfg.dt_s
+        return sample
+
+    def iter_duration(self, duration_s: float) -> Iterable[TrafficSample]:
+        n = int(math.ceil(duration_s / self.cfg.dt_s))
+        for _ in range(n):
+            yield self.sample()
+
+
+def make_traffic_model(kind: str, dt_s: float, seed: Optional[int] = None):
+    """Factory used by CLI tools.
+
+    kind='stochastic' keeps the previous AR/burst/regime process.
+    kind='sine_abrupt' uses smooth sine waves for controlled slices and abrupt noise.
+    """
+    kind = (kind or "stochastic").strip().lower().replace("-", "_")
+    if kind in ("sine", "sine_abrupt", "sine_noise", "curriculum"):
+        return SineAbruptTrafficModel(SineAbruptTrafficModelConfig(dt_s=dt_s), seed=seed)
+    if kind in ("stochastic", "default", "ar_burst"):
+        return FourSliceTrafficModel(TrafficModelConfig(dt_s=dt_s), seed=seed)
+    raise ValueError(f"unknown traffic model: {kind}")

@@ -1,2 +1,0 @@
-== bessctl show pipeline ==
-bessctl not found as bessctl

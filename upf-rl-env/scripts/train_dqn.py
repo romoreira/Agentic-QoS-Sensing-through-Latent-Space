@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover, handled at runtime
 
 import upf_rl_env  # registers env
 from upf_rl_env.config import DQNConfig
+from upf_rl_env.sources.real_csv import RealCsvMetricSource
 from upf_rl_agents.dqn import DQNAgent
 
 
@@ -45,6 +46,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=DQNConfig.lr)
     p.add_argument("--batch-size", type=int, default=DQNConfig.batch_size)
     p.add_argument("--gamma", type=float, default=DQNConfig.gamma)
+    p.add_argument("--metric-source", type=str, default="mock", choices=["mock", "real_csv"],
+                   help="Telemetry source for the environment. real_csv replays a CSV from real_telemetry_probe.py.")
+    p.add_argument("--csv", type=str, default=None,
+                   help="Path to real telemetry CSV when --metric-source real_csv is used.")
+    p.add_argument("--csv-no-loop", action="store_true",
+                   help="Do not loop the real CSV at EOF, keep replaying the final row.")
     return p.parse_args()
 
 
@@ -88,7 +95,12 @@ def _tb_log_step(writer: Optional["SummaryWriter"], step: int, reward: float, ac
 
     if hidden:
         writer.add_scalar("hidden/regime", hidden.get("regime", 0), step)
-        writer.add_scalar("hidden/noise_offered_mbps", hidden.get("hidden_offered_mbps", 0.0), step)
+        writer.add_scalar("hidden/noise_offered_mbps", hidden.get("hidden_offered_mbps", hidden.get("noise_offered_mbps", 0.0)), step)
+        writer.add_scalar("hidden/noise_rx_mbps", hidden.get("noise_rx_mbps", 0.0), step)
+        writer.add_scalar("hidden/noise_loss", hidden.get("noise_loss", 0.0), step)
+        writer.add_scalar("hidden/pfcp_sessions", hidden.get("pfcp_sessions", 0.0), step)
+        writer.add_scalar("hidden/trex_total_tx_pkts", hidden.get("trex_total_tx_pkts", 0.0), step)
+        writer.add_scalar("hidden/trex_total_rx_pkts", hidden.get("trex_total_rx_pkts", 0.0), step)
         writer.add_scalar("hidden/n6_capacity_mbps", hidden.get("n6_capacity_mbps", 0.0), step)
 
     for k, v in reward_components.items():
@@ -163,9 +175,20 @@ def main() -> None:
         device=device,
     )
 
-    train_env = gym.make("upf-rl/SliceQoS-v0")
+    if args.metric_source == "real_csv":
+        if not args.csv:
+            raise SystemExit("--csv is required when --metric-source real_csv is used.")
+        train_source = RealCsvMetricSource(args.csv, loop=not args.csv_no_loop, use_action_mbr=True)
+        eval_source = RealCsvMetricSource(args.csv, loop=True, use_action_mbr=True)
+        train_env = gym.make("upf-rl/SliceQoS-v0", metric_source=train_source)
+        eval_env = gym.make("upf-rl/SliceQoS-v0", metric_source=eval_source)
+        log.info("metric_source=real_csv csv=%s rows=%d", args.csv, len(train_source.rows))
+        log.warning("real_csv is offline replay: actions do not change the recorded traffic or loss. Use it for wiring/smoke tests before online control.")
+    else:
+        train_env = gym.make("upf-rl/SliceQoS-v0")
+        eval_env = gym.make("upf-rl/SliceQoS-v0")
+
     train_env.unwrapped._log_csv_path = os.path.join(args.log_csv_dir, "train.csv")  # type: ignore[attr-defined]
-    eval_env = gym.make("upf-rl/SliceQoS-v0")
 
     obs_dim = int(np.prod(train_env.observation_space.shape))  # type: ignore[arg-type]
     n_actions = int(train_env.action_space.n)                   # type: ignore[arg-type]

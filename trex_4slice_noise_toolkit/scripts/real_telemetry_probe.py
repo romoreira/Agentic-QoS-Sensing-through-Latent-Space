@@ -39,6 +39,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from traffic_model import (
     FourSliceTrafficModel,
     TrafficModelConfig,
+    make_traffic_model,
     SLICE_NAMES,
     SLICE_PG_IDS,
 )
@@ -223,6 +224,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--duration", type=float, default=60.0)
     p.add_argument("--dt", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--traffic-model", default="stochastic", choices=["stochastic", "sine_abrupt"], help="traffic generator: stochastic AR/burst regime or clean sinusoids + abrupt noise")
     p.add_argument("--upf-metrics-url", default="http://192.168.90.1:8080/metrics")
     p.add_argument("--n6-capacity-mbps", type=float, default=1000.0)
     p.add_argument("--mbr-gold-kbps", type=float, default=200000.0)
@@ -243,8 +245,7 @@ def main() -> int:
     Path(args.jsonl).parent.mkdir(parents=True, exist_ok=True)
     writer = make_writer(args.tb)
 
-    cfg = TrafficModelConfig(dt_s=args.dt)
-    model = FourSliceTrafficModel(cfg, seed=args.seed)
+    model = make_traffic_model(args.traffic_model, dt_s=args.dt, seed=args.seed)
 
     api = import_trex()
     STLClient = api[0]

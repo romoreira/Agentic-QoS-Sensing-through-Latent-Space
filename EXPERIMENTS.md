@@ -1,982 +1,1213 @@
-# Slice-Aware MBR Control with Latent State Estimation (BESS UPF)
+# EXPERIMENTS
 
-## Goal
+## Purpose
 
-Evaluate whether a **temporal latent representation** of UPF telemetry improves slice-aware MBR control under dynamic, partially-observable traffic demand, compared to static, reactive, and non-latent ML baselines.
+This document records the current experimental state of the four slice UPF, TRex, and DQN testbed. It is intended for a reader who opens the repository with no prior context and needs to understand what was built, why it was built, how it was validated, how to reproduce the tests, and what remains before enabling real BESS control.
 
-The objective is to preserve the **Gold** slice under overload by reducing the MBR of lower-priority slices (Bronze first, Silver second), via PFCP/QER updates.
+The current milestone is an online DQN dry run. The DQN observes real live telemetry from TRex and the UPF, chooses an action, writes the intended MBR decision to CSV, JSONL, and TensorBoard, but does not modify BESS or PFCP state.
 
-Correct name for this stage:
+## High level goal
 
-```text
-Slice-aware MBR control
-```
+The experiment studies whether a DQN can learn slice aware MBR decisions for a mobile data plane with one uplink and multiple logical slices.
 
-Do not call this stage "queue priority scheduling". No BESS queue priority is implemented; control happens through `pfcpctl session modify`.
-
-## Key claim (testable)
+Main question
 
 ```text
-A temporal latent representation of UPF telemetry improves slice-aware MBR
-control under dynamic, partially-observable demand — preserving Gold service
-while shifting degradation toward lower priority slices — over and above
-what static rules, reactive thresholds, and raw-feature ML baselines achieve.
+Can an RL agent observe real per slice traffic pressure and select MBR actions that preserve higher priority slices while reacting to hidden background load?
 ```
 
-Two falsifiability conditions must be checked before any AI training (see Pre-flight gates):
-
-1. The problem must contain a **non-trivial latent factor** that the controller cannot observe directly. Without this, latent representations have nothing extra to encode.
-2. The **Threshold (B1) → Oracle (B6) gap** must be large enough on held-out scenarios to leave room for AI improvement. If B1 already reaches ≥ 95% of Oracle reward, the scenario is too easy and must be redesigned.
-
----
-
-## Pre-flight gates (run before B2–B5)
-
-These cheap checks prevent wasting weeks on a setup that cannot prove the claim.
-
-### Gate G1 — PFCP apply latency
-
-Measure end-to-end latency of `pfcpctl session modify` over 100 isolated calls. Record:
+Current design
 
 ```text
-p50_pfcp_apply_latency_ms
-p95_pfcp_apply_latency_ms
-p99_pfcp_apply_latency_ms
+Gold    controlled slice, high priority
+Silver  controlled slice, medium priority
+Bronze  controlled slice, low priority
+Noise   fourth slice, hidden from the DQN observation, used as background pressure
 ```
 
-Rule:
+The fourth slice is deliberately not given to the DQN as a per slice feature. It appears only indirectly through aggregate N6 utilization, loss pressure, and audit logs. This is useful now for DQN stress testing and later for latent space sensing.
+
+## Current status
+
+Already working
+
+* Four PFCP sessions are created and visible in the UPF
+* BESS rules are installed for four TEIDs
+* TRex sends four GTP-U streams over one uplink port
+* TRex receives decapsulated traffic on the return port
+* Per slice RX, TX, loss, and latency stats are available through TRex PG IDs
+* UPF aggregate metrics are readable from Prometheus
+* A sine based traffic model exists for Gold, Silver, and Bronze
+* An abrupt background noise model exists for the Noise slice
+* Real online telemetry is written to CSV, JSONL, and TensorBoard
+* DQN replay from real CSV works, but it is not causal and should not be used as an acting policy
+* DQN trained in the mock causal environment loads correctly
+* Online DQN dry run works with live metrics and does not modify BESS
+* The mock causal checkpoint produced plausible online dry run actions in the first 120 second test, mostly A00 and A02
+
+Not enabled yet
+
+* No real `pfcpctl modify` is called by the online DQN dry run
+* The DQN does not enforce MBRs in BESS yet
+* No final guardrail layer has been added
+* No full long duration online dry run has been accepted yet
+* No latent representation has been plugged in yet
+
+## Repository layout
+
+The repository currently has two main parts.
 
 ```text
-If p95_pfcp_apply_latency_ms > 0.5 * window_sec_ms
-  redesign actuation (e.g. async apply, larger window, batched updates)
-  before continuing.
+Agentic-QoS-Sensing-through-Latent-Space/
+  trex_4slice_noise_toolkit/
+  upf-rl-env/
+  bkp/upf-rl-env/
 ```
 
-A slow actuation loop confounds the comparison — predictive controllers will appear to win *because they tolerate actuation lag*, not because of latent state. We need to separate those effects.
+### `trex_4slice_noise_toolkit`
 
-### Gate G2 — Threshold vs Oracle gap on the held-out test set
+This directory contains the real traffic and telemetry tooling.
 
-Run B0 (Static), B1 (Threshold), B6 (Oracle) on the held-out scenarios (defined in Dataset D0). Compute on the test split only:
+Expected content
 
 ```text
-oracle_reward_test     = mean reward of B6 on test set
-threshold_reward_test  = mean reward of B1 on test set
-static_reward_test     = mean reward of B0 on test set
+trex_4slice_noise_toolkit/
+  profiles/
+    exp4_4slice_single_uplink_profile.py
 
-threshold_gap = (oracle_reward_test - threshold_reward_test) / oracle_reward_test
-static_gap    = (oracle_reward_test - static_reward_test)    / oracle_reward_test
+  scripts/
+    preview_traffic_model.py
+    real_telemetry_probe.py
+    online_dqn_dryrun.py
+    run_trex_dynamic_4slice.py
+    audit_trex_stats.py
+    audit_bess_stats.py
+    traffic_model.py
+
+  bess/
+    check_bess_4slices.sh
+
+  runs/
+    live_sine_abrupt/
+    hour_sine_abrupt/
+    online_dqn_dryrun/
+    online_dqn_dryrun_mock_causal/
+    online_dqn_dryrun_mock_causal_420s/
+    tensorboard/
 ```
 
-Rules:
+Responsibilities
 
 ```text
-If threshold_gap < 0.05
-  scenarios are too easy; increase latent factor strength (see Latent Factor Model)
-  before training any ML baseline.
-
-If static_gap < 0.10
-  there is no overload; raise aggregate offered demand or lower N6 capacity.
-
-If threshold_gap > 0.05 and static_gap > 0.10
-  proceed to B2–B5.
+Generate traffic
+Collect real TRex PG ID telemetry
+Collect UPF Prometheus metrics
+Write TensorBoard data
+Run online DQN dry run
+Never modify BESS in dry run mode
 ```
 
-### Gate G3 — Latent factor observability check
+### `upf-rl-env`
 
-The latent factor model below introduces hidden state. Verify that **raw features cannot recover it well** by training a simple regressor (linear or shallow MLP) from raw features to the hidden state value. If R² > 0.8, the "latent" is not actually hidden and must be made stronger (more noise, more memory).
+This directory contains the Gymnasium environment, the DQN agent, the action space, reward function, metric sources, and training scripts.
 
----
-
-## Latent factor model (the core redesign)
-
-A plain sinusoid trio is fully recoverable from one window of measurements; that is why naive baselines tie with AI in such setups. To create real room for latent representations, the environment must contain factors that are **not observable from per-window telemetry alone** and that **affect optimal control**.
-
-We introduce three hidden mechanisms. None of them is exposed in any telemetry CSV; only their *effects* on `n6_tx_mbps`, loss, and delay leak through.
-
-### L1 — Hidden background flow
-
-A fourth, unmanaged UDP flow shares N6 with the three slices. It is **not** assigned a QER and is **not** present in offered-load CSVs.
+Expected content
 
 ```text
-bg_rate(t) = bg_base + bg_amp * sin(2*pi*bg_freq*t + bg_phase)
-           + AR1_noise(t, rho=0.85, sigma=bg_sigma)
+upf-rl-env/
+  src/
+    upf_rl_env/
+      env.py
+      config.py
+      features.py
+      reward.py
+      action/
+        space.py
+        applier.py
+      sources/
+        base.py
+        mock.py
+        real_csv.py
+        trex.py
+        bess.py
+      monitor/
+        logger.py
+
+    upf_rl_agents/
+      dqn.py
+      networks.py
+      replay.py
+
+  scripts/
+    train_dqn.py
+    eval_dqn.py
+    sanity_check_real_csv.py
+
+  checkpoints/
+    dqn_real_csv/
+    dqn_mock_causal/
+
+  runs/
+    dqn_real_csv/
+    dqn_mock_causal/
+    tensorboard/
 ```
 
-The controller does not see `bg_rate(t)`. Recommended starting values:
+Responsibilities
 
 ```text
-bg_base   = 100 Mbps
-bg_amp    = 80 Mbps
-bg_freq   uniform on [0.005, 0.05] Hz   (different from any slice freq)
-bg_phase  uniform on [0, 2*pi]
-bg_sigma  = 25 Mbps
+Define the 85 dimension observation
+Define the 15 action space
+Compute reward
+Train DQN
+Save checkpoints
+Evaluate DQN
+Provide model checkpoints for online dry run
 ```
 
-### L2 — Time-varying effective N6 capacity
+## Slice mapping
 
-Effective N6 capacity drifts on a slow timescale (emulates cross-traffic on the egress path, link sharing, or competing tenants):
+| Slice | TEID | UE IP | Source port | PG ID | Nominal app MBR | Controlled by DQN |
+| --- | ---: | --- | ---: | ---: | ---: | --- |
+| Gold | 1 | 10.250.0.1 | 10001 | 1 | 200000 kbps | yes |
+| Silver | 11 | 10.250.0.2 | 10011 | 11 | 100000 kbps | yes |
+| Bronze | 21 | 10.250.0.3 | 10021 | 21 | 50000 kbps | yes |
+| Noise | 31 | 10.250.0.4 | 10031 | 31 | 50000 kbps | no |
+
+Network endpoints
 
 ```text
-cap(t) = cap_nominal * (1 + cap_drift_amp * sin(2*pi*cap_freq*t + cap_phase))
-       + cap_jitter(t)
+GNB IP      192.168.70.2
+UPF N3 IP   192.168.70.1
+DN IP       192.168.80.2
+UPF metrics http://192.168.90.1:8080/metrics
 ```
 
-Recommended:
+The four slices share one uplink. There is no multiport experiment here. These are logical slices over the same path.
+
+## Control plane recovery
+
+### Start or verify `pfcpsim`
+
+The known running container has been
 
 ```text
-cap_nominal     = 700 Mbps
-cap_drift_amp   = 0.15           (i.e. +/- 15 percent slow drift)
-cap_freq        uniform on [0.002, 0.02] Hz
-cap_jitter      Gaussian, sigma = 20 Mbps, refreshed every 1 s
+container name  pfcpsim
+image           pfcpsim:patched
+entrypoint      pfcpsim
+command         -p 12345 --interface enp9s0
 ```
 
-The controller never receives `cap(t)`. It only observes `n6_tx_mbps`, which is the *outcome* of `min(aggregate_demand(t) + bg_rate(t), cap(t))` minus drops.
-
-### L3 — Correlated demand noise
-
-Each slice's offered load is the sinusoidal base plus AR(1) noise:
-
-```text
-offered_slice(t) = base + amp * sin(2*pi*freq*t + phase) + AR1(rho=0.7, sigma=slice_sigma)
-slice_sigma in {Gold: 20 Mbps, Silver: 30 Mbps, Bronze: 40 Mbps}
-```
-
-This breaks the property "current telemetry uniquely determines current demand", which is what makes raw-feature controllers win when absent.
-
-### Why this matters
-
-Under L1–L3, the **Oracle uses ground-truth `bg_rate(t)` and `cap(t)`** when computing the ideal action. The deployable controllers do not. A controller that only looks at the current window cannot distinguish "Bronze is consuming capacity" from "the background flow is consuming capacity" — but a controller with a temporal embedding can infer the regime from history. This is the analogue of UNUM's argument for congestion control.
-
----
-
-## Experiment idea
-
-Three non-synchronized sinusoidal slice demands plus the hidden factors L1–L3 are generated by TRex. The aggregate observable demand exceeds effective N6 capacity during overload windows.
-
-Per-slice demand:
-
-```text
-rate_slice(t) = base + amp * sin(2*pi*freq*t + phase) + AR1_noise(t)
-```
-
-Baseline scenario (training distribution centers; jittered per scenario — see D0):
-
-| Slice  | Base Mbps | Amplitude Mbps | Phase           | Expected behavior        |
-|--------|----------:|---------------:|-----------------|--------------------------|
-| Gold   | 300       | 100            | 0               | Preserve                 |
-| Silver | 250       | 150            | pi / 3          | Degrade after Bronze     |
-| Bronze | 250       | 200            | 2 * pi / 3      | Degrade first            |
-
-```text
-Visible aggregate peak (slices only):  ~900 Mbps
-Hidden background peak:                ~180 Mbps
-Aggregate true peak load:              ~1080 Mbps
-Nominal N6 capacity:                   700 Mbps
-Effective capacity range under L2:     ~580 to ~820 Mbps
-```
-
----
-
-## Action space
-
-Discrete, but denser than a 5-action toy space, to avoid artificially flattening differences between controllers. 15 actions covering the priority simplex.
-
-| Action ID | Gold Mbps | Silver Mbps | Bronze Mbps | Tier                  |
-|----------:|----------:|------------:|------------:|-----------------------|
-| 0         | 1000      | 1000        | 1000        | No restriction        |
-| 1         | 1000      | 1000        | 700         | Bronze light          |
-| 2         | 1000      | 1000        | 400         | Bronze moderate       |
-| 3         | 1000      | 1000        | 200         | Bronze strong         |
-| 4         | 1000      | 1000        | 80          | Bronze hard           |
-| 5         | 1000      | 800         | 400         | Silver light + Bronze |
-| 6         | 1000      | 800         | 150         | Silver light + Bronze hard |
-| 7         | 1000      | 600         | 200         | Silver moderate       |
-| 8         | 1000      | 600         | 80          | Silver moderate + Bronze hard |
-| 9         | 1000      | 400         | 100         | Silver strong         |
-| 10        | 1000      | 300         | 50          | Silver hard           |
-| 11        | 900       | 500         | 100         | Gold light emergency  |
-| 12        | 800       | 500         | 100         | Gold moderate emergency |
-| 13        | 800       | 400         | 80          | Gold + Silver emergency |
-| 14        | 700       | 300         | 50          | Full emergency        |
-
-Gold is reduced only in actions 11–14 (emergency tier).
-
----
-
-## Common runtime command
-
-All runtime controllers apply MBR changes with PFCP. Example for action 7 (Gold 1000 / Silver 600 / Bronze 200, Mbps):
+Check it with
 
 ```bash
-sudo docker exec pfcpsim pfcpctl -s localhost:12345 session modify \
-  --count 3 --baseID 1 \
+sudo docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | egrep -i "pfcpsim|bess|upf|pfcp" || true
+sudo docker inspect pfcpsim --format 'Name={{.Name}} Image={{.Config.Image}} Cmd={{json .Config.Cmd}} Entrypoint={{json .Config.Entrypoint}}'
+```
+
+If the container is missing, the equivalent startup pattern is
+
+```bash
+sudo docker run -d \
+  --name pfcpsim \
+  --network host \
+  --privileged \
+  pfcpsim:patched \
+  -p 12345 \
+  --interface enp9s0
+```
+
+Use the interface that reaches the UPF PFCP side in your deployment.
+
+Verify the CLI
+
+```bash
+sudo docker run --rm pfcpsim:patched --help
+sudo docker exec pfcpsim sh -lc 'pfcpsim --help || /pfcpsim --help || true'
+```
+
+### Create the four PFCP sessions
+
+Use this from the TRex host where `pfcpsim` is running.
+
+```bash
+sudo docker exec pfcpsim pfcpctl -s localhost:12345 session delete \
+  --count 4 --baseID 1 || true
+
+sudo docker exec pfcpsim pfcpctl -s localhost:12345 session delete \
+  --count 3 --baseID 1 || true
+
+sudo docker exec pfcpsim pfcpctl -s localhost:12345 session create \
+  --count 4 --baseID 1 \
   --ue-pool 10.250.0.0/24 \
   --gnb-addr 192.168.70.2 \
   --app-filter "udp:any:any:allow:100" \
-  --session-mbr-uplink   1000000,1000000,1000000 \
-  --session-mbr-downlink 1000000,1000000,1000000 \
-  --app-mbr-uplink       1000000,600000,200000 \
-  --app-mbr-downlink     1000000,600000,200000
+  --session-mbr-uplink   1000000,1000000,1000000,1000000 \
+  --session-mbr-downlink 1000000,1000000,1000000,1000000 \
+  --app-mbr-uplink       200000,100000,50000,50000 \
+  --app-mbr-downlink     200000,100000,50000,50000
 ```
 
----
+Expected log
 
-## Common telemetry
+```bash
+sudo docker logs --tail 100 pfcpsim 2>&1 | egrep -i "Create session|sessions were established|Delete|error|fail|baseID"
+```
 
-One telemetry row per control window.
+Expected result
 
 ```text
-window_sec   = 0.200   (200 ms — fine enough to see dynamics, coarse enough for PFCP)
-duration_sec = 600     (per run; longer for held-out runs)
+Create session idx=0 baseID=1
+Create session idx=1 baseID=11
+Create session idx=2 baseID=21
+Create session idx=3 baseID=31
+4 sessions were established using 1 as baseID
 ```
 
-Rationale: the original 1 s window kills temporal signal — sinusoidal periods of 20–200 s yield only a handful of samples per period. 200 ms gives ~3000 samples per run and ≥100 samples per period, which is what an encoder needs to learn dynamics.
+### Verify BESS and UPF rules
 
-If Gate G1 forces actuation slower than 200 ms, decouple:
+On the UPF host
 
-- Telemetry collection: 200 ms (used for embedding input).
-- Decision cadence: 1 s (downsampled, but informed by the high-rate embedding).
+```bash
+curl -s http://127.0.0.1:8080/metrics | grep pfcp_sessions
 
----
+sudo docker exec bess /opt/bess/bessctl/bessctl show module pdrLookup | grep -E "rules|packets|gate"
+sudo docker exec bess /opt/bess/bessctl/bessctl show module farLookup | grep -E "rules|packets|gate"
+sudo docker exec bess /opt/bess/bessctl/bessctl show module appQERLookup | grep -E "rules|packets|gate"
+sudo docker exec bess /opt/bess/bessctl/bessctl show module sessionQERLookup | grep -E "rules|packets|gate"
+```
 
-## Common CSV outputs
-
-Every baseline writes:
+Expected state
 
 ```text
-results/<baseline_name>/telemetry_windows.csv
-results/<baseline_name>/actions.csv
-results/<baseline_name>/trex_stats.csv
-results/<baseline_name>/bess_counters.csv
-results/<baseline_name>/summary_metrics.csv
+pfcp_sessions      4
+pdrLookup          8 rules
+farLookup          8 rules
+appQERLookup       16 rules
+sessionQERLookup   8 rules
 ```
 
-Plus, **only for Oracle**, a ground-truth side file with hidden state used to compute the optimal action:
+Useful sanity check
+
+```bash
+sudo docker exec bess /opt/bess/bessctl/bessctl show module appQERLookup | grep -E "packets|appQERMeterRed|appQERLookupFail"
+sudo docker exec bess /opt/bess/bessctl/bessctl show module sessionQERLookup | grep -E "packets|sessionQERMeterRed|sessionQERStatusDrop"
+sudo docker exec bess /opt/bess/bessctl/bessctl show module farLookup | grep -E "packets|farLookupFail"
+sudo docker exec bess /opt/bess/bessctl/bessctl show module enp8s0np0Routes | grep -E "packets|bad_route"
+```
+
+Expected failure counters
 
 ```text
-results/b6_oracle/hidden_state.csv
+appQERLookupFail       0
+sessionQERStatusDrop   0
+farLookupFail          0
+enp8s0np0bad_route     0
 ```
 
-This file must **not** be readable by any other baseline's controller code (enforce via separate directory and a simple lint check in the experiment runner).
+QER RED counters may increase when offered traffic exceeds app level limits. That is not a datapath failure.
 
-### telemetry_windows.csv
+## TRex recovery and validation
 
-| Column | Meaning |
-|---|---|
-| timestamp | Window timestamp |
-| scenario_id | Scenario identifier |
-| window_index | Control window index |
-| gold_offered_mbps | TRex offered load for Gold (visible) |
-| silver_offered_mbps | TRex offered load for Silver (visible) |
-| bronze_offered_mbps | TRex offered load for Bronze (visible) |
-| gold_rx_mbps | Delivered Gold throughput |
-| silver_rx_mbps | Delivered Silver throughput |
-| bronze_rx_mbps | Delivered Bronze throughput |
-| gold_loss_rate | Gold packet loss ratio |
-| silver_loss_rate | Silver packet loss ratio |
-| bronze_loss_rate | Bronze packet loss ratio |
-| n3_rx_mbps | UPF N3 received throughput |
-| n6_tx_mbps | UPF N6 transmitted throughput |
-| n6_utilization | n6_tx_mbps / cap_nominal (NOT effective cap; controller does not see L2) |
-| app_qer_red_gold | Gold app QER red packets delta |
-| app_qer_red_silver | Silver app QER red packets delta |
-| app_qer_red_bronze | Bronze app QER red packets delta |
-| session_qer_red_gold | Gold session QER red packets delta |
-| session_qer_red_silver | Silver session QER red packets delta |
-| session_qer_red_bronze | Bronze session QER red packets delta |
-| current_mbr_gold_kbps | Current Gold MBR |
-| current_mbr_silver_kbps | Current Silver MBR |
-| current_mbr_bronze_kbps | Current Bronze MBR |
-| rtt_avg_ms | Average RTT this window (if latency streams enabled) |
-| residual_capacity_estimate_mbps | n6_tx_mbps - aggregate_offered_slices (proxy that leaks L1; do not feed as label) |
+### Start the TRex server
 
-### actions.csv
+In one terminal on the TRex host
 
-| Column | Meaning |
-|---|---|
-| timestamp | Decision timestamp |
-| scenario_id | Scenario identifier |
-| window_index | Window index |
-| controller_name | Baseline name |
-| action_id | Selected action |
-| target_mbr_gold_kbps | New Gold MBR |
-| target_mbr_silver_kbps | New Silver MBR |
-| target_mbr_bronze_kbps | New Bronze MBR |
-| reason | Short decision explanation |
-| decision_latency_ms | Time to compute action |
-| pfcp_apply_latency_ms | Time to apply PFCP update |
-| apply_status | applied, skipped, or failed |
-| guardrail_triggered | bool, only for B5 |
-| fallback_action_id | Action chosen by fallback, only if guardrail triggered |
+```bash
+cd /opt/trex/v3.08
+sudo ./t-rex-64 -i --software --no-ofed-check -c 8
+```
 
-### trex_stats.csv
+The `--software` mode is important in this setup.
 
-| Column | Meaning |
-|---|---|
-| timestamp | Collection timestamp |
-| stream_id | TRex stream identifier |
-| slice | Gold, Silver, Bronze, or background |
-| offered_mbps | Desired offered load (visible to controller for slices, hidden for background) |
-| tx_mbps | TRex transmitted throughput |
-| rx_mbps | TRex received throughput |
-| tx_packets | Transmitted packets |
-| rx_packets | Received packets |
-| lost_packets | Lost packets |
-| loss_rate | Packet loss rate |
-| latency_avg_us | Average latency if latency streams are enabled |
-| latency_p95_us | p95 latency if available |
-| latency_p99_us | p99 latency if available |
-| jitter_us | Jitter if available |
+In any Python terminal that uses TRex STL libraries
 
-### bess_counters.csv
+```bash
+export PYTHONPATH=/opt/trex/v3.08/automation/trex_control_plane/interactive:$PYTHONPATH
+```
 
-| Column | Meaning |
-|---|---|
-| timestamp | Collection timestamp |
-| pdr_rules | Number of PDR rules |
-| far_rules | Number of FAR rules |
-| app_qer_rules | Number of app QER rules |
-| session_qer_rules | Number of session QER rules |
-| pdr_packets | PDR matched packets |
-| pdr_fail_packets | PDR lookup failures |
-| app_qer_green_packets | App QER green packets |
-| app_qer_yellow_packets | App QER yellow packets |
-| app_qer_red_packets | App QER red packets |
-| session_qer_green_packets | Session QER green packets |
-| session_qer_yellow_packets | Session QER yellow packets |
-| session_qer_red_packets | Session QER red packets |
-| far_packets | FAR matched packets |
-| far_fail_packets | FAR lookup failures |
-| n3_rx_packets | N3 port RX packets |
-| n3_rx_bytes | N3 port RX bytes |
-| n6_tx_packets | N6 port TX packets |
-| n6_tx_bytes | N6 port TX bytes |
+Verify imports
 
-### summary_metrics.csv
+```bash
+python3 - <<'PY'
+from trex_stl_lib.api import STLClient
+print("TRex STL lib OK")
+PY
+```
 
-| Metric | Meaning |
-|---|---|
-| gold_sla_violation_rate | Fraction of windows where Gold violates SLA |
-| gold_avg_throughput_mbps | Average delivered Gold throughput |
-| gold_p95_loss_rate | p95 Gold loss rate |
-| silver_avg_throughput_mbps | Average delivered Silver throughput |
-| bronze_avg_throughput_mbps | Average delivered Bronze throughput |
-| bronze_degradation_ratio | Bronze delivered / Bronze offered |
-| n6_avg_utilization | Average N6 utilization (vs nominal cap) |
-| n6_p95_utilization | p95 N6 utilization |
-| total_goodput_mbps | Total delivered throughput |
-| total_loss_rate | Aggregate loss rate |
-| action_changes | Number of MBR vector changes |
-| avg_decision_latency_ms | Average controller decision latency |
-| avg_pfcp_apply_latency_ms | Average PFCP apply latency |
-| oracle_gap | Distance from Oracle reward (test split only) |
-| reward | Composite reward (see Reward function) |
+### Manual four slice console validation
 
-### Reward function (composite, used to rank controllers)
+Open the console
+
+```bash
+cd /opt/trex/v3.08
+sudo ./trex-console
+```
+
+Run
 
 ```text
-reward(window) =
-      w_gold     * gold_rx_mbps
-    + w_silver   * silver_rx_mbps
-    + w_bronze   * bronze_rx_mbps
-    - p_gold     * max(0, gold_offered_mbps - gold_rx_mbps)
-    - p_silver   * max(0, silver_offered_mbps - silver_rx_mbps)
-    - p_bronze   * max(0, bronze_offered_mbps - bronze_rx_mbps)
-    - p_loss     * (gold_loss_rate + 0.5 * silver_loss_rate + 0.1 * bronze_loss_rate)
-    - p_change   * action_changed_this_window
+reset
+service --port 1
+start -f /home/ubuntu/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit/profiles/exp4_4slice_single_uplink_profile.py -p 0 -d 20 --force
+stats
+stats -l
 ```
 
-Default weights:
+Expected result
 
 ```text
-w_gold = 3.0    w_silver = 1.5   w_bronze = 0.5
-p_gold = 10.0   p_silver = 2.0   p_bronze = 0.2
-p_loss = 50.0   p_change = 0.5
+Port 1 RX > 0
+PG ID 1  TX > 0 and RX > 0
+PG ID 11 TX > 0 and RX > 0
+PG ID 21 TX > 0 and RX > 0
+PG ID 31 TX > 0 and RX > 0
+Errors should be zero except expected policy loss on overloaded slices
 ```
 
-Gold penalty dominates — this encodes the SLA priority. `p_change` discourages oscillation.
+## Important telemetry lessons learned
 
----
+### Use `STLFlowLatencyStats` for this setup
 
-# Baselines
+A test with `STLFlowStats` showed TX counters but RX counters stayed zero after UPF decapsulation. This makes `STLFlowStats` unsuitable for the per slice RX metrics needed by the DQN.
 
-## B0 — Static MBR
-
-### Objective
-
-Keep a fixed MBR vector for the entire run.
-
-Answers:
+The working path is
 
 ```text
-What happens when QER limits are static while offered demand and latent state change.
+STLFlowLatencyStats
+TRex server in software mode
+service mode enabled on RX port 1
+PG ID stats read with total counters
 ```
 
-### Microtasks
+### PG ID keys may be integers
 
-1. Define the fixed MBR vector (use action 0).
-2. Start TRex traffic (slices + hidden background).
-3. Do not update MBR during the run.
-4. Collect TRex and BESS telemetry every window.
-5. Generate summary metrics.
+The Python API can return PG ID keys as integers, not strings.
 
-### Required output
+Use robust lookup logic.
+
+```python
+def pg_get(d, pg_id):
+    return d.get(pg_id) or d.get(str(pg_id)) or {}
+```
+
+### Prefer total counters
+
+The RX packets for each PG ID are on port 1. The parser must prefer
 
 ```text
-results/b0_static/...
+rx_pkts.total
+rx_bytes.total
+rx_bps.total
 ```
 
-### Expected behavior
-
-Lower bound. Will fail Gold SLA during overload.
-
----
-
-## B1 — Reactive threshold
-
-### Objective
-
-Deterministic if-then rules over current telemetry.
-
-Answers:
+then fall back to
 
 ```text
-Can a hand-tuned reactive controller protect Gold without modeling latent state.
+rx_pkts.1
+rx_bytes.1
+rx_bps.1
 ```
 
-### Example triggers
+and only then to port 0.
 
-| Signal | Trigger |
-|---|---|
-| n6_utilization | > 0.90 |
-| app_qer_red_bronze | > 0 |
-| aggregate_red_packets | > 0 |
-| gold_loss_rate | > 0.01 |
+### TensorBoard tag groups
 
-### Example policy
+In the current real telemetry probe, the useful tag groups are
 
 ```text
-If overload starts          -> reduce Bronze first
-If overload persists K wins -> reduce Silver
-If overload clears R wins   -> restore Bronze gradually, then Silver
-Reduce Gold only in emergency (gold_loss_rate > threshold for K_e windows)
+traffic_target/*
+dqn_features/*
+audit/*
 ```
 
-Tune K, R, K_e on the **training split only**. Report on the test split.
+Older `trex_pgid/*` tags may not exist in the current probe. That is expected.
 
-### Microtasks
+## Traffic model
 
-1. Implement threshold rules.
-2. Read telemetry every control window.
-3. Select action from common action space.
-4. Apply MBR vector via `pfcpctl session modify`.
-5. Log the rule that triggered the action.
-6. Generate summary metrics.
-
-### Required output
+The current recommended model is
 
 ```text
-results/b1_threshold/...
+sine_abrupt
 ```
 
-### Expected behavior
-
-Better than Static. May react late (no anticipation) and oscillate. **Used in Gate G2.**
-
----
-
-## B2 — Raw KNN
-
-### Objective
-
-KNN over raw telemetry features.
-
-Answers:
+Its intent is
 
 ```text
-Can a memory-based AI select useful MBR actions without a latent representation.
+Gold    smooth sine wave
+Silver  smooth sine wave with different period
+Bronze  smooth sine wave with different period
+Noise   abrupt background steps and bursts
 ```
 
-### Input features (per window)
+The point is to separate predictable controlled demand from hidden abrupt background pressure.
+
+Preview without TRex
+
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit
+
+python3 scripts/preview_traffic_model.py \
+  --traffic-model sine_abrupt \
+  --duration 3600 \
+  --dt 1.0 \
+  --csv runs/hour_sine_abrupt/traffic_plan_1h.csv \
+  --tb runs/tensorboard/traffic_plan_1h_sine_abrupt
+```
+
+Open TensorBoard
+
+```bash
+tensorboard --logdir runs/tensorboard \
+  --host 0.0.0.0 \
+  --port 6006
+```
+
+Look at
 
 ```text
-gold_offered_mbps, silver_offered_mbps, bronze_offered_mbps
-gold_rx_mbps, silver_rx_mbps, bronze_rx_mbps
-gold_loss_rate, silver_loss_rate, bronze_loss_rate
-n6_tx_mbps, n6_utilization
-app_qer_red_gold, app_qer_red_silver, app_qer_red_bronze
-current_mbr_gold_kbps, current_mbr_silver_kbps, current_mbr_bronze_kbps
+traffic_target/gold_mbps
+traffic_target/silver_mbps
+traffic_target/bronze_mbps
+traffic_target/noise_mbps
 ```
 
-### Target
+This is only the plan, not real telemetry.
+
+## Real online telemetry without DQN
+
+This mode generates real traffic and collects real telemetry. It does not use DQN and it does not modify BESS.
+
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit
+
+export PYTHONPATH=/opt/trex/v3.08/automation/trex_control_plane/interactive:$PYTHONPATH
+
+rm -rf runs/live_sine_abrupt
+rm -rf runs/tensorboard/live_sine_abrupt
+
+python3 scripts/real_telemetry_probe.py \
+  --host 127.0.0.1 \
+  --port 0 \
+  --rx-port 1 \
+  --duration 3600 \
+  --dt 1.0 \
+  --traffic-model sine_abrupt \
+  --upf-metrics-url http://192.168.90.1:8080/metrics \
+  --force \
+  --csv runs/live_sine_abrupt/real_telemetry_live.csv \
+  --jsonl runs/live_sine_abrupt/real_telemetry_live.jsonl \
+  --tb runs/tensorboard/live_sine_abrupt
+```
+
+TensorBoard
+
+```bash
+tensorboard --logdir runs/tensorboard/live_sine_abrupt \
+  --host 0.0.0.0 \
+  --port 6006
+```
+
+Check
 
 ```text
-oracle_action_id
+dqn_features/offered_gold_mbps
+dqn_features/rx_gold_mbps
+dqn_features/loss_gold
+dqn_features/n6_total_mbps
+dqn_features/n6_utilization
+audit/noise_offered_mbps
+audit/noise_rx_mbps
+audit/pfcp_sessions
 ```
 
-### Microtasks
-
-1. Reuse training scenarios from D0 (train split only).
-2. Generate Oracle labels for each window.
-3. Build `datasets/raw_knn/train_windows.csv`.
-4. Train KNN classifier (sweep k in {1, 3, 5, 9, 15}; scale features with StandardScaler).
-5. Save model.
-6. Evaluate on the held-out test split (D0 test split — including OOD scenarios).
-7. Run online or replay control.
-
-### Required output
+Criteria
 
 ```text
-datasets/raw_knn/train_windows.csv
-datasets/raw_knn/test_windows.csv
-models/raw_knn.joblib
-results/b2_raw_knn/...
+pfcp_sessions = 4
+rx_* > 0
+n6_total_mbps > 0
+noise has abrupt behavior
+loss_* reacts to pressure
+upf_access_drop_delta is zero or stable
 ```
 
-### Expected behavior
+## DQN observation
 
-Improves over Static and possibly Threshold on in-distribution scenarios. Should **degrade on OOD test split** (new phases/frequencies) — that degradation is the evidence motivating B4.
-
----
-
-## B3 — Raw ML
-
-### Objective
-
-Supervised classifier over raw features.
-
-Models to sweep:
+The DQN observation is
 
 ```text
-Random Forest      (n_estimators in {100, 300})
-Gradient Boosting  (n_estimators in {100, 300}, max_depth in {3, 6})
-MLP                (hidden in {(64,), (128, 64), (256, 128)})
+5 stacked windows × 17 features = 85 dimensions
 ```
 
-Select best on the validation split.
-
-### Microtasks
-
-1. Reuse Raw KNN dataset.
-2. Train classifier for `oracle_action_id`.
-3. Save model.
-4. Evaluate offline accuracy on test split (including OOD).
-5. Run replay or online evaluation.
-6. Log actions and decision latency.
-
-### Required output
+Feature order per window
 
 ```text
-datasets/raw_ml/train_windows.csv
-datasets/raw_ml/test_windows.csv
-models/raw_ml.joblib
-results/b3_raw_ml/...
+0   offered_gold_mbps
+1   offered_silver_mbps
+2   offered_bronze_mbps
+3   rx_gold_mbps
+4   rx_silver_mbps
+5   rx_bronze_mbps
+6   loss_gold
+7   loss_silver
+8   loss_bronze
+9   qer_red_gold
+10  qer_red_silver
+11  qer_red_bronze
+12  n6_total_mbps
+13  n6_utilization
+14  mbr_gold_kbps
+15  mbr_silver_kbps
+16  mbr_bronze_kbps
 ```
 
-### Expected behavior
+The Noise slice is excluded from the DQN observation as a per slice feature. It is logged under audit.
 
-Stronger non-latent AI baseline. Should also degrade on OOD test split. **B3 is the controller B4/B5 must beat to claim latent value.**
-
----
-
-## B4 — Latent KNN
-
-### Objective
-
-KNN in a learned embedding space.
-
-Answers:
+Normalization is centralized in
 
 ```text
-Does a learned temporal representation improve KNN decisions over raw features.
+upf-rl-env/src/upf_rl_env/features.py
 ```
 
-### Encoder
+Current normalization
 
-Predictive temporal encoder.
+```python
+f[0:3] = m.offered_mbps / cfg.norm_mbps
+f[3:6] = m.rx_mbps / cfg.norm_mbps
+f[6:9] = m.loss_rate
+f[9:12] = np.log1p(m.qer_red) / 10.0
+f[12] = m.n6_tx_mbps / cfg.norm_mbps
+f[13] = m.n6_utilization
+f[14:17] = m.mbr_kbps.astype(np.float32) / cfg.norm_kbps
+```
+
+Relevant defaults
 
 ```text
-Input:    last W = 32 telemetry windows  (~6.4 s of context at 200 ms)
-Target:   future telemetry over the next H = 8 windows
-Loss:     bucketized classification, one head per feature (UNUM-style)
-Bucketization: Quantile-50 per feature, fit on training split only
-Architecture: 4-layer Transformer encoder, embedding dim 32, 4 heads
-              OR 2-layer LSTM with hidden 64 (fallback for compute)
-Embedding: z = encoder(last W windows), dim 32
+norm_mbps = 250.0
+norm_kbps = 250000.0
 ```
 
-KNN is applied to z, not to raw features.
+A check confirmed online observations are normalized, with values roughly between 0.0 and 0.88 during the dry run.
 
-### Microtasks
+## Action space
 
-1. Build sequence dataset from telemetry windows (training split only).
-2. Fit bucket boundaries on training split; freeze.
-3. Train temporal encoder via windowed next-token prediction.
-4. Save encoder as `models/latent_encoder.pt`.
-5. Generate embeddings for all training and test windows.
-6. Train KNN over training embeddings (sweep k).
-7. Evaluate on held-out test split (including OOD).
-8. Compare against B2.
-
-### Required output
+The action space is
 
 ```text
-datasets/latent_knn/sequences_train.npz
-datasets/latent_knn/sequences_test.npz
-datasets/latent_knn/embeddings_train.csv
-datasets/latent_knn/embeddings_test.csv
-models/latent_encoder.pt
-models/latent_knn.joblib
-results/b4_latent_knn/...
+Discrete(15)
 ```
 
-### Expected behavior
-
-If B4 > B2 on OOD test split → temporal latent state matters for this control problem.
-
-If B4 ≈ B2 → the latent factor L1–L3 is too weak, or W is too short, or the encoder undertrained. Retrain G3 first.
-
----
-
-## B5 — Latent neural controller
-
-### Objective
-
-Temporal encoder + policy head choosing the MBR action end-to-end.
-
-Answers:
+Actions map to per slice MBR percentages. The exact mapping is defined in
 
 ```text
-Can a latent temporal controller preserve Gold better than static, threshold,
-and raw AI baselines, especially on OOD scenarios.
+upf-rl-env/src/upf_rl_env/action/space.py
 ```
 
-### Model
+Important actions observed so far
 
 ```text
-Encoder:    same architecture as B4 (Transformer 4-layer or LSTM 2-layer)
-            Initialize from B4 encoder weights, then fine-tune end-to-end.
-Policy:     MLP head, 2 layers, hidden 128, outputs softmax over 15 actions.
-Input:      last W = 32 telemetry windows + current MBR vector
-Output:     action_id (classification)
-Training:   supervised on oracle_action_id (training split)
-            Cross-entropy loss; AdamW; lr 1e-4; early stop on val reward.
+A00 = Gold 100%, Silver 100%, Bronze 100%
+A02 = Gold 100%, Silver 100%, Bronze 70%
+A11 = Gold 85%, Silver 30%, Bronze 30%
 ```
 
-Use action classification first (auditable). Regression onto continuous MBR is a follow-up if classification saturates.
+A11 was the bad action selected by the checkpoint trained on real CSV replay. A00 and A02 were selected by the checkpoint trained in the mock causal environment.
 
-### Guardrail (mandatory)
+## Why real CSV replay was not enough
 
-Run a decoder head in parallel that predicts future telemetry from z. Track:
+The real CSV contains real metrics from TRex and the UPF. It is useful for validating feature shape, normalization, TensorBoard logging, and offline inference.
+
+It is not enough to train a control policy, because the action does not change the next row of the CSV.
+
+In replay mode
 
 ```text
-pred_error_w = avg bucket index distance between predicted and observed
-               over the last G windows (G = 10)
+DQN chooses action
+environment advances to next CSV row
+loss, RX, and utilization are already fixed
 ```
 
-Rule:
+Therefore, the action has no causal effect on the future telemetry. This caused a policy collapse in one experiment.
+
+Observed behavior
 
 ```text
-If pred_error_w > tau for more than G windows
-  guardrail_triggered = true
-  fall back to B1 (Threshold) for the next F windows (F = 20)
-  log fallback_action_id
+checkpoint trained on real_csv selected A11 for every online dry run step
+A11 was too aggressive for low N6 utilization
 ```
 
-Tune tau on the training split to give a false-trigger rate < 5% on in-distribution data.
+The reward also includes a large SLA penalty when Gold loss exceeds `0.01`. Real measured loss often sits around `0.066`, so this penalty can dominate if used directly with real telemetry.
 
-Justification: UNUM reports +6 pp reward from guardrails because latent models fail under distribution shift. Same risk here, especially on OOD test scenarios. **B5 without a guardrail is not a defensible system.**
-
-### Microtasks
-
-1. Build sequence dataset.
-2. Generate Oracle labels.
-3. Pre-train encoder via B4's objective; freeze briefly, then fine-tune.
-4. Train policy head + fine-tune encoder.
-5. Train decoder head for guardrail predictions.
-6. Validate on unseen phases and frequencies (OOD set).
-7. Save models.
-8. Run online or replay evaluation with guardrail enabled.
-9. Apply actions through PFCP.
-10. Log confidence, decision latency, and guardrail events.
-
-### Required output
+Conclusion
 
 ```text
-datasets/latent_controller/train_sequences.npz
-datasets/latent_controller/test_sequences.npz
-models/latent_controller.pt
-models/latent_decoder.pt
-results/b5_latent_controller/...
+real_csv is good for validation
+real_csv alone is not good for learning a causal control policy
 ```
 
-### Expected behavior
+## Causal mock training
 
-B5 reduces Gold SLA violations and reduces action_changes vs B1/B2/B3. Improvement is **largest on OOD test split** — this is the signature of latent value.
+The mock environment is currently the correct place to train DQN, because in the mock environment the selected action changes MBR and the new MBR changes the next state.
 
----
+Run causal mock training
 
-## B6 — Oracle
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/upf-rl-env
 
-### Objective
+rm -rf runs/tensorboard/dqn_mock_causal
+rm -rf runs/dqn_mock_causal
+rm -rf checkpoints/dqn_mock_causal
 
-Compute the ideal offline action using **ground-truth slice demand, hidden background, and effective N6 capacity**. Not deployable. Upper bound.
+python3 scripts/train_dqn.py \
+  --device cuda \
+  --metric-source mock \
+  --total-steps 200000 \
+  --save-dir checkpoints/dqn_mock_causal \
+  --log-csv-dir runs/dqn_mock_causal \
+  --tb-dir runs/tensorboard/dqn_mock_causal
+```
 
-### Inputs (uses hidden state — controller-side baselines cannot)
+Expected completion
 
 ```text
-gold_offered_mbps(t)        (visible)
-silver_offered_mbps(t)      (visible)
-bronze_offered_mbps(t)      (visible)
-bg_rate(t)                  (hidden — from L1 generator)
-cap(t)                      (hidden — from L2 generator)
-priority rule
-action space
+checkpoints/dqn_mock_causal/final.pt
 ```
 
-### Deterministic rule
+Check TensorBoard
+
+```bash
+tensorboard --logdir runs/tensorboard/dqn_mock_causal \
+  --host 0.0.0.0 \
+  --port 6006
+```
+
+Useful tags
 
 ```text
-Available for slices = max(0, cap(t) - bg_rate(t))
-
-1. Serve Gold up to gold_offered_mbps, but at most Available.
-2. Remaining = Available - served_gold
-3. Serve Silver up to silver_offered_mbps, but at most Remaining.
-4. Remaining = Remaining - served_silver
-5. Serve Bronze up to bronze_offered_mbps, but at most Remaining.
-6. Map ideal (served_gold, served_silver, served_bronze) to the closest
-   action in the discrete action space (L1 distance in MBR-vector space).
-7. Record oracle_action_id and oracle_reason.
+env/reward
+dqn/loss
+dqn/q_mean
+dqn/td_abs_mean
+dqn/epsilon
+action/action_id
+mbr/gold_kbps
+mbr/silver_kbps
+mbr/bronze_kbps
+traffic/n6_utilization
+reward_components/*
 ```
 
-### Microtasks
+## Online DQN dry run
 
-1. Read slice offered-load CSV.
-2. Read hidden bg_rate(t) and cap(t) trajectories from the scenario generator.
-3. For each window, compute Available and ideal allocation.
-4. Snap to closest action.
-5. Save oracle labels and ideal-MBR trajectory.
-6. Use labels for B2/B3/B4/B5 training (training split only).
-7. Use Oracle test-split reward as the upper bound.
+This is the current important milestone.
 
-### Required output
+In this mode
 
 ```text
-datasets/oracle/oracle_actions.csv
-datasets/oracle/oracle_mbr_vectors.csv
-results/b6_oracle/summary_metrics.csv
-results/b6_oracle/hidden_state.csv
+TRex generates real traffic
+UPF/BESS processes real traffic
+the script reads live TRex and UPF metrics
+the DQN observes the normalized live metrics
+the DQN chooses an action
+the action is logged only
+no pfcpctl command is issued
+BESS is not modified
 ```
 
-### Required columns in oracle_actions.csv
+Run short dry run with causal mock checkpoint
+
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit
+
+export PYTHONPATH=/opt/trex/v3.08/automation/trex_control_plane/interactive:$PYTHONPATH
+
+rm -rf runs/online_dqn_dryrun_mock_causal
+rm -rf runs/tensorboard/online_dqn_dryrun_mock_causal
+
+python3 scripts/online_dqn_dryrun.py \
+  --host 127.0.0.1 \
+  --port 0 \
+  --rx-port 1 \
+  --duration 120 \
+  --dt 1.0 \
+  --traffic-model sine_abrupt \
+  --upf-metrics-url http://192.168.90.1:8080/metrics \
+  --checkpoint ../upf-rl-env/checkpoints/dqn_mock_causal/final.pt \
+  --device cpu \
+  --force \
+  --csv runs/online_dqn_dryrun_mock_causal/online_dqn_dryrun.csv \
+  --jsonl runs/online_dqn_dryrun_mock_causal/online_dqn_dryrun.jsonl \
+  --tb runs/tensorboard/online_dqn_dryrun_mock_causal
+```
+
+Expected terminal message
 
 ```text
-timestamp
-scenario_id
-window_index
-gold_demand_mbps
-silver_demand_mbps
-bronze_demand_mbps
-bg_rate_mbps                (hidden)
-effective_capacity_mbps     (hidden)
-oracle_action_id
-oracle_mbr_gold_kbps
-oracle_mbr_silver_kbps
-oracle_mbr_bronze_kbps
-oracle_reason
+DRY RUN MODE: actions are logged only. No pfcpctl call. No BESS/PFCP modification.
 ```
 
-### Expected behavior
+Open TensorBoard
 
-Fully auditable. Anyone can regenerate it from generator seeds + scenario catalog.
+```bash
+tensorboard --logdir runs/tensorboard/online_dqn_dryrun_mock_causal \
+  --host 0.0.0.0 \
+  --port 6006
+```
 
----
-
-# Dataset generation
-
-## D0 — Scenario catalog (with explicit OOD holdout)
-
-Purpose: list every sinusoidal scenario used in training, validation, and testing.
-
-Required output:
+Useful tags
 
 ```text
-datasets/scenario_catalog.csv
+live_metrics/loss_gold
+live_metrics/loss_silver
+live_metrics/loss_bronze
+live_metrics/n6_total_mbps
+live_metrics/n6_utilization
+dryrun/action_id
+dryrun/intended_mbr_gold_kbps
+dryrun/intended_mbr_silver_kbps
+dryrun/intended_mbr_bronze_kbps
+dryrun/reward_diagnostic
+dryrun/q_max
+dryrun/q_mean
+audit/noise_offered_mbps
+audit/noise_rx_mbps
+audit/pfcp_sessions
 ```
 
-### Sampling distributions
+Summarize actions
+
+```bash
+python3 - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("runs/online_dqn_dryrun_mock_causal/online_dqn_dryrun.csv")
+
+print("Action counts")
+print(df["dryrun_action_id"].value_counts().sort_index())
+
+print()
+print(df[[
+    "loss_gold",
+    "loss_silver",
+    "loss_bronze",
+    "n6_utilization",
+    "noise_offered_mbps",
+    "dryrun_action_id",
+    "dryrun_action_description",
+]].describe(include="all"))
+PY
+```
+
+The first short test with the mock causal checkpoint produced
 
 ```text
-Training distribution (used to draw 60 scenarios):
-  gold_base       in [250, 350] Mbps
-  gold_amplitude  in [80, 120]  Mbps
-  gold_freq       in [0.01, 0.05] Hz
-  gold_phase      in [0, 2*pi]
-  (silver, bronze: analogous, see below)
-  bg_freq         in [0.005, 0.05] Hz
-  cap_freq        in [0.002, 0.02] Hz
-  noise_level     in {low, medium}
-
-Validation distribution (10 scenarios):
-  same ranges, different random seeds.
-
-Test-IND distribution (10 scenarios, in-distribution test):
-  same ranges, different random seeds.
-
-Test-OOD distribution (10 scenarios, out-of-distribution holdout):
-  gold_freq       in [0.06, 0.10] Hz   (OUTSIDE training range)
-  silver_freq     in [0.06, 0.10] Hz   (OUTSIDE training range)
-  bronze_freq     in [0.06, 0.10] Hz   (OUTSIDE training range)
-  noise_level     = high                (OUTSIDE training range)
-  bg_amp          = 1.5 * training_max (OUTSIDE training range)
+A00 84 times
+A02 36 times
 ```
 
-The OOD split is the **only honest test** for the key claim. Report results separately on Test-IND and Test-OOD.
+This was a better pattern than the earlier real CSV checkpoint, because the DQN mostly preserved all MBRs and reduced only Bronze in a limited interval.
 
-### Columns
+A follow up summary showed that A02 appeared when Gold offered traffic was higher, with mean Gold offered around 188.8 Mbps for A02 versus 172.4 Mbps for A00.
+
+## Current 420 second dry run
+
+The current long short test is a 420 second online dry run with the causal mock checkpoint.
+
+Why 420 seconds
 
 ```text
-scenario_id
-gold_base_mbps, gold_amplitude_mbps, gold_frequency, gold_phase
-silver_base_mbps, silver_amplitude_mbps, silver_frequency, silver_phase
-bronze_base_mbps, bronze_amplitude_mbps, bronze_frequency, bronze_phase
-bg_base_mbps, bg_amplitude_mbps, bg_frequency, bg_phase, bg_sigma
-cap_nominal_mbps, cap_drift_amp, cap_frequency, cap_phase, cap_jitter_sigma
-n6_capacity_mbps    (= cap_nominal, controller-visible nominal only)
-duration_sec
-window_sec
-noise_level
-split               (train | val | test_ind | test_ood)
-seed                (RNG seed; full reproducibility)
+It is long enough to cover the slowest sine period used in the current sine_abrupt model.
+It is still short enough for fast debugging.
+It does not act on BESS.
 ```
 
-## D1 — Sinusoidal demand log
+Run
 
-Purpose: record exact offered demand (slices visible; hidden factors in a separate file).
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit
 
-Required output:
+rm -rf runs/online_dqn_dryrun_mock_causal_420s
+rm -rf runs/tensorboard/online_dqn_dryrun_mock_causal_420s
+
+python3 scripts/online_dqn_dryrun.py \
+  --host 127.0.0.1 \
+  --port 0 \
+  --rx-port 1 \
+  --duration 420 \
+  --dt 1.0 \
+  --traffic-model sine_abrupt \
+  --upf-metrics-url http://192.168.90.1:8080/metrics \
+  --checkpoint ../upf-rl-env/checkpoints/dqn_mock_causal/final.pt \
+  --device cpu \
+  --force \
+  --csv runs/online_dqn_dryrun_mock_causal_420s/online_dqn_dryrun.csv \
+  --jsonl runs/online_dqn_dryrun_mock_causal_420s/online_dqn_dryrun.jsonl \
+  --tb runs/tensorboard/online_dqn_dryrun_mock_causal_420s
+```
+
+Summarize
+
+```bash
+python3 - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("runs/online_dqn_dryrun_mock_causal_420s/online_dqn_dryrun.csv")
+
+print("Action counts")
+print(df["dryrun_action_id"].value_counts().sort_index())
+
+print("\nMean metrics by action")
+print(df.groupby("dryrun_action_id")[[
+    "loss_gold",
+    "loss_silver",
+    "loss_bronze",
+    "n6_utilization",
+    "noise_offered_mbps",
+    "offered_gold_mbps",
+    "offered_silver_mbps",
+    "offered_bronze_mbps",
+]].mean())
+PY
+```
+
+Acceptance criteria
 
 ```text
-datasets/sinusoidal_demands.csv         (visible to all controllers)
-datasets/hidden_demands.csv             (Oracle-only; gitignore for controllers)
+BESS still unmodified
+pfcp_sessions remains 4
+rx_* remains positive
+n6_total_mbps remains positive
+A00 dominates when there is no pressure
+Bronze reducing actions appear only under plausible pressure
+Gold should not be reduced unless the situation is extreme
+No reappearance of the A11 collapse
 ```
 
-`sinusoidal_demands.csv` columns:
+## TensorBoard hygiene
+
+Do not point TensorBoard to broad parent directories when comparing specific tests. Use one logdir per question.
+
+Real telemetry only
+
+```bash
+tensorboard --logdir runs/tensorboard/live_sine_abrupt \
+  --host 0.0.0.0 \
+  --port 6006
+```
+
+Causal mock training only
+
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/upf-rl-env
+
+tensorboard --logdir runs/tensorboard/dqn_mock_causal \
+  --host 0.0.0.0 \
+  --port 6006
+```
+
+Online dry run only
+
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit
+
+tensorboard --logdir runs/tensorboard/online_dqn_dryrun_mock_causal \
+  --host 0.0.0.0 \
+  --port 6006
+```
+
+420 second online dry run only
+
+```bash
+tensorboard --logdir runs/tensorboard/online_dqn_dryrun_mock_causal_420s \
+  --host 0.0.0.0 \
+  --port 6006
+```
+
+Stop old TensorBoard instances if needed
+
+```bash
+pkill -f tensorboard || true
+```
+
+## Interpretation notes
+
+### Target traffic versus real telemetry
+
+`traffic_target/*` is the intended generation pattern.
+
+`dqn_features/*` is what the agent would observe after TRex, BESS, QER, and UPF processing.
+
+`audit/*` is additional information for sanity checks.
+
+### Offered Mbps versus RX Mbps
+
+Offered traffic is measured before UPF decapsulation, while RX traffic is measured after decapsulation.
+
+Before UPF
 
 ```text
-timestamp
-scenario_id
-gold_offered_mbps
-silver_offered_mbps
-bronze_offered_mbps
-aggregate_offered_mbps_slices
-n6_capacity_mbps                (nominal, not effective)
-overload_visible                (aggregate_offered_mbps_slices > n6_capacity_mbps)
+Ether / IP / UDP / GTP-U / IP / UDP / payload
 ```
 
-`hidden_demands.csv` columns:
+After UPF
 
 ```text
-timestamp
-scenario_id
-bg_rate_mbps
-effective_capacity_mbps
-true_overload                   (aggregate + bg > effective_capacity)
+Ether / IP / UDP / payload
 ```
 
-## D2 — Labeled control windows
+Therefore, Mbps values before and after decapsulation are not exactly comparable by byte count.
 
-Purpose: train supervised controllers.
-
-Required output:
+For loss, use packet based loss
 
 ```text
-datasets/control_windows_labeled.csv
+loss = max(tx_pkts - rx_pkts, 0) / max(tx_pkts, 1)
 ```
 
-Columns:
+This is the more stable delivery signal.
+
+### Real loss baseline
+
+The live testbed often reports loss around 0.066 even in moderate traffic windows. This must be calibrated before using a strict SLA threshold such as 0.01 in online reward logic.
+
+Do not interpret `loss > 0.01` as immediate service failure until the measurement baseline is calibrated.
+
+## What was tested
+
+### Four session creation
+
+Result
 
 ```text
-all telemetry_windows.csv columns
-oracle_action_id
-oracle_mbr_gold_kbps, oracle_mbr_silver_kbps, oracle_mbr_bronze_kbps
-split   (train | val | test_ind | test_ood)
+TEID 1, 11, 21, and 31 were created
+pfcp_sessions became 4
 ```
 
-Strict rule: when training any model, **filter to split == 'train'**. The runner must assert this.
+### BESS rule installation
 
----
-
-# Final comparison
-
-Run every controller on **both** Test-IND and Test-OOD. Two tables — same columns; the OOD one is the headline result.
-
-| Controller | Gold SLA viol. | Gold thrpt | Bronze degrad. | N6 util. | Total goodput | Action changes | Decision lat. | Reward | Oracle gap |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| B0 Static            |  |  |  |  |  |  |  |  |  |
-| B1 Threshold         |  |  |  |  |  |  |  |  |  |
-| B2 Raw KNN           |  |  |  |  |  |  |  |  |  |
-| B3 Raw ML            |  |  |  |  |  |  |  |  |  |
-| B4 Latent KNN        |  |  |  |  |  |  |  |  |  |
-| B5 Latent controller |  |  |  |  |  |  |  |  |  |
-| B5 + Guardrail       |  |  |  |  |  |  |  |  |  |
-| B6 Oracle            |  |  |  |  |  |  |  |  |  |
-
-Repeat each controller × scenario combination at least **5 times** with different RNG seeds for the AR(1) noise. Report mean ± 95% CI.
-
-### Interpretation rules (decide before running)
+Result
 
 ```text
-Claim supported if ALL of the following hold on Test-OOD:
-
-  reward(B5+Guardrail) > reward(B3) + 1 CI  (latent beats best raw ML)
-  reward(B4)           > reward(B2) + 1 CI  (latent embedding beats raw KNN)
-  gold_sla_violation_rate(B5+Guardrail) < gold_sla_violation_rate(B1)
-  action_changes(B5+Guardrail) < action_changes(B1)  (less oscillation)
-  oracle_gap(B5+Guardrail) < oracle_gap(B3)
-
-Claim partially supported if:
-  reward(B5+Guardrail) > reward(B3) on Test-OOD but not on Test-IND
-  (latent value shows up under distribution shift only — still a valid result)
-
-Claim rejected if:
-  reward(B5+Guardrail) <= reward(B3) on both splits
-  In this case, report the negative result and analyze why.
+pdrLookup          8 rules
+farLookup          8 rules
+appQERLookup       16 rules
+sessionQERLookup   8 rules
 ```
 
-A negative result is publishable. A negative result hidden by a weak experimental setup is not.
+### TRex four PG ID forwarding
 
----
-
-# Recommended implementation order
-
-1. Implement sinusoidal scenario generator **with L1, L2, L3 hidden factors**.
-2. Implement TRex traffic runner (slices + hidden background flow).
-3. Implement BESS and TRex telemetry collector (200 ms window).
-4. **Run Gate G1 (PFCP latency).** Stop and fix if it fails.
-5. Implement B0 Static.
-6. Implement B1 Threshold.
-7. Implement B6 Oracle.
-8. Generate D0 catalog (train / val / test_ind / test_ood).
-9. Build D1 (visible + hidden demand logs) and D2 (labeled windows).
-10. **Run Gate G2 (B0 / B1 / B6 on test set).** Stop and redesign L1–L3 if it fails.
-11. **Run Gate G3 (latent observability).** Stop and strengthen latent if R² > 0.8.
-12. Implement B2 Raw KNN.
-13. Implement B3 Raw ML.
-14. Implement B4 Latent KNN.
-15. Implement B5 Latent controller + Guardrail.
-16. Run all baselines on Test-IND and Test-OOD (≥ 5 seeds each).
-17. Generate plots and final comparison tables.
-18. Apply the Interpretation rules. Write up the result honestly, whichever direction it goes.
-
----
-
-# Key claim (restated for clarity)
+Result
 
 ```text
-A temporal latent representation of UPF telemetry improves slice-aware
-MBR control under dynamic, partially-observable demand, preserving Gold
-service while shifting degradation toward lower priority slices, and
-this improvement is largest on out-of-distribution scenarios — which
-is the regime where latent state estimation should help most.
+PG ID 1, 11, 21, and 31 had TX and RX counters
+Port 1 received decapsulated traffic
 ```
+
+### QER behavior
+
+Result
+
+```text
+loss was attributed to appQERMeterRed when caps were exceeded
+pdrLookupFail stayed zero
+farLookupFail stayed zero
+bad_route stayed zero
+```
+
+### Real telemetry probe
+
+Result
+
+```text
+real_telemetry_probe.py writes valid CSV, JSONL, and TensorBoard
+RX by PG ID works
+Prometheus UPF metrics work
+pfcp_sessions remains 4
+```
+
+### DQN real CSV replay
+
+Result
+
+```text
+valid for observation and normalization checks
+not valid as a causal policy training source
+policy collapsed to A11
+```
+
+### DQN mock causal training
+
+Result
+
+```text
+checkpoint was trained in an environment where actions affect future telemetry
+checkpoint loaded in online dry run
+policy no longer collapsed to A11 in the short test
+```
+
+### Online DQN dry run
+
+Result
+
+```text
+live metrics were read online
+DQN selected actions online
+actions were logged only
+BESS was not modified
+```
+
+## What remains before real BESS control
+
+### Immediate next step
+
+Complete the 420 second dry run and inspect action distribution.
+
+Accept if
+
+```text
+A00 dominates normal states
+Bronze reducing actions appear under plausible pressure
+Gold is preserved
+pfcp_sessions remains 4
+no BESS modification occurs
+```
+
+### Add guardrails
+
+Before allowing any real action, add a safety layer.
+
+Candidate guardrails
+
+```text
+Never reduce Gold if n6_utilization < 0.8 and loss_gold is near baseline
+Never apply A11 unless n6_utilization is high or sustained loss is severe
+Do not apply actions more often than every 10 seconds
+Require action persistence for two or three windows before applying
+Keep Noise MBR fixed at 50000 kbps
+Log proposed action and safe action separately
+```
+
+### Implement real action applier
+
+The real action applier should eventually call `pfcpctl session modify`.
+
+Template
+
+```bash
+sudo docker exec pfcpsim pfcpctl -s localhost:12345 session modify \
+  --count 4 --baseID 1 \
+  --app-filter "udp:any:any:allow:100" \
+  --session-mbr-uplink   1000000,1000000,1000000,1000000 \
+  --session-mbr-downlink 1000000,1000000,1000000,1000000 \
+  --app-mbr-uplink       GOLD,SILVER,BRONZE,50000 \
+  --app-mbr-downlink     GOLD,SILVER,BRONZE,50000
+```
+
+The fourth value is always the Noise MBR and should remain fixed during the first online control experiment.
+
+### Run online control in stages
+
+Recommended sequence
+
+```text
+1. online telemetry only
+2. online DQN dry run, no BESS modification
+3. online DQN dry run with guardrails logged
+4. online DQN with guardrails and manual confirmation outside the script
+5. online DQN with guardrails and automatic pfcpctl modify
+```
+
+### Later latent space experiment
+
+Once the raw DQN path is stable, add a latent encoder.
+
+The latent experiment should use the same traffic, same action space, same reward, and same evaluation windows. Only the observation representation changes.
+
+Potential comparison
+
+```text
+Raw DQN        uses 5 × 17 handcrafted features
+Latent DQN     uses an encoded representation of the recent telemetry sequence
+```
+
+The hidden Noise slice is useful here because the latent encoder can learn to infer hidden pressure from the visible controlled slices and aggregate N6 behavior.
+
+## Quick reproduction checklist
+
+Start the infrastructure
+
+```bash
+sudo docker ps
+sudo docker logs --tail 100 pfcpsim
+curl -s http://192.168.90.1:8080/metrics | grep pfcp_sessions
+```
+
+Create four sessions
+
+```bash
+sudo docker exec pfcpsim pfcpctl -s localhost:12345 session create \
+  --count 4 --baseID 1 \
+  --ue-pool 10.250.0.0/24 \
+  --gnb-addr 192.168.70.2 \
+  --app-filter "udp:any:any:allow:100" \
+  --session-mbr-uplink   1000000,1000000,1000000,1000000 \
+  --session-mbr-downlink 1000000,1000000,1000000,1000000 \
+  --app-mbr-uplink       200000,100000,50000,50000 \
+  --app-mbr-downlink     200000,100000,50000,50000
+```
+
+Start TRex
+
+```bash
+cd /opt/trex/v3.08
+sudo ./t-rex-64 -i --software --no-ofed-check -c 8
+```
+
+Run online dry run
+
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit
+
+export PYTHONPATH=/opt/trex/v3.08/automation/trex_control_plane/interactive:$PYTHONPATH
+
+python3 scripts/online_dqn_dryrun.py \
+  --host 127.0.0.1 \
+  --port 0 \
+  --rx-port 1 \
+  --duration 120 \
+  --dt 1.0 \
+  --traffic-model sine_abrupt \
+  --upf-metrics-url http://192.168.90.1:8080/metrics \
+  --checkpoint ../upf-rl-env/checkpoints/dqn_mock_causal/final.pt \
+  --device cpu \
+  --force \
+  --csv runs/online_dqn_dryrun_mock_causal/online_dqn_dryrun.csv \
+  --jsonl runs/online_dqn_dryrun_mock_causal/online_dqn_dryrun.jsonl \
+  --tb runs/tensorboard/online_dqn_dryrun_mock_causal
+```
+
+Confirm no BESS modification
+
+```text
+The online dry run must print
+DRY RUN MODE: actions are logged only. No pfcpctl call. No BESS/PFCP modification.
+```
+
+Summarize
+
+```bash
+python3 - <<'PY'
+import pandas as pd
+df = pd.read_csv("runs/online_dqn_dryrun_mock_causal/online_dqn_dryrun.csv")
+print(df["dryrun_action_id"].value_counts().sort_index())
+print(df.groupby("dryrun_action_id")[["n6_utilization", "offered_gold_mbps", "offered_silver_mbps", "offered_bronze_mbps"]].mean())
+PY
+```
+
+## Current decision
+
+Do not enable real BESS control yet.
+
+The online dry run path is working. The next decision should be based on the 420 second run summary. If the policy remains conservative and plausible, the next engineering task is to add guardrails and an explicit safe action layer before implementing real `pfcpctl modify`.
+
