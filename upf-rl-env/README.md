@@ -12,6 +12,18 @@ This version keeps the testbed assumption simple and aligned with the working TR
 - TRex readings are still mocked inside the RL environment
 - TensorBoard logs DQN metrics and current per-slice traffic metrics
 
+
+## Installation note
+
+This package supports editable installation:
+
+```bash
+python3 -m pip install --upgrade pip setuptools wheel
+python3 -m pip install -e .
+```
+
+The `setup.py` file is intentionally kept as a fallback for machines whose pip/setuptools stack does not fully support editable installs through `pyproject.toml`.
+
 ## Quickstart
 
 ```bash

@@ -1,11 +1,14 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+# setuptools >=64 implements the PEP 660 build_editable hook required by
+# `pip install -e .` when a project uses pyproject.toml.
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "upf-rl-env"
-version = "0.1.0"
+version = "0.1.1"
 description = "Gymnasium env + DQN agent for slice-aware MBR control on BESS-UPF"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "gymnasium>=0.29",
