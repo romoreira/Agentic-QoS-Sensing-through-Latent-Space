@@ -1,0 +1,17 @@
+== four-slice plan ==
+{
+  "description": "PFCP/QER plan for receiving four GTP-U slices from TRex on one uplink. The first three slices are controlled later by DQN. The fourth slice is background noise.",
+  "n3": {
+    "gnb_ip": "192.168.70.2",
+    "upf_n3_ip": "192.168.70.1"
+  },
+  "dn": {
+    "dn_ip": "192.168.80.2"
+  },
+  "slices": [
+    {"name": "gold", "teid": 1, "ue_ip": "10.250.0.1", "src_port": 10001, "qer_name": "qer_gold", "initial_mbr_kbps": 200000, "controlled_by_dqn": true},
+    {"name": "silver", "teid": 11, "ue_ip": "10.250.0.2", "src_port": 10011, "qer_name": "qer_silver", "initial_mbr_kbps": 100000, "controlled_by_dqn": true},
+    {"name": "bronze", "teid": 21, "ue_ip": "10.250.0.3", "src_port": 10021, "qer_name": "qer_bronze", "initial_mbr_kbps": 50000, "controlled_by_dqn": true},
+    {"name": "noise", "teid": 31, "ue_ip": "10.250.0.4", "src_port": 10031, "qer_name": "qer_noise", "initial_mbr_kbps": 50000, "controlled_by_dqn": false}
+  ]
+}
