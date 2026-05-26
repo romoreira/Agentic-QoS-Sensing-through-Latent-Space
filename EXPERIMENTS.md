@@ -1211,3 +1211,430 @@ Do not enable real BESS control yet.
 
 The online dry run path is working. The next decision should be based on the 420 second run summary. If the policy remains conservative and plausible, the next engineering task is to add guardrails and an explicit safe action layer before implementing real `pfcpctl modify`.
 
+
+
+## Before Bess:
+
+
+# Appendix, Online DQN Dry Run Results and Safety Insights
+
+This appendix documents the current state of the four slice experiment after validating online DQN decision making with live telemetry and without modifying BESS or PFCP rules. It is intended to be appended to the existing `README.md` or `EXPERIMENTS.md`.
+
+## Current validated stage
+
+The experiment has reached the online dry run stage.
+
+The active pipeline is now
+
+```text
+TRex generates four slice traffic
+BESS UPF processes the GTP U traffic
+UPF Prometheus and TRex PG ID counters provide live telemetry
+DQN reads the live telemetry
+DQN selects an action
+A safety guardrail filters unsafe actions
+The selected safe action is logged only
+No BESS or PFCP modification is performed
+```
+
+The fourth slice remains a hidden perturbation slice. The DQN observes only the three controlled slices, Gold, Silver, and Bronze. The Noise slice is logged for audit, but it is not part of the controlled per slice observation.
+
+## Important distinction from the previous CSV replay stage
+
+Two DQN modes were tested.
+
+### Offline real CSV replay
+
+The `real_csv` mode used real telemetry collected from TRex, UPF, and BESS, but the data was replayed from a fixed CSV file. This was useful for validating the observation shape, feature normalization, TensorBoard logging, and GPU training.
+
+However, this mode is not causal. The DQN action does not change the next telemetry row, because the next state is already fixed in the CSV. Therefore, the policy trained only on `real_csv` should not be used for BESS control.
+
+Observed issue in this mode
+
+```text
+The policy collapsed to A11
+A11 means Gold 85 percent, Silver 30 percent, Bronze 30 percent
+This was too aggressive for low N6 utilization
+```
+
+The diagnosis was
+
+```text
+The action had no causal effect on future loss, RX, or utilization
+The reward was almost always dominated by the Gold SLA penalty
+The checkpoint learned a fixed preference instead of a robust control policy
+```
+
+### Mock causal training
+
+The DQN was then trained with the `mock` metric source, where the selected action changes the MBR vector and therefore changes the next state. This is the correct training mode for learning a causal control policy before connecting to the real BESS.
+
+The resulting checkpoint was
+
+```text
+upf-rl-env/checkpoints/dqn_mock_causal/final.pt
+```
+
+This checkpoint was then used in online dry run mode with live telemetry from the real testbed.
+
+## Online dry run command
+
+The online dry run uses real metrics and logs the DQN decision, but does not call `pfcpctl` and does not modify BESS.
+
+Example command
+
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit
+
+python3 scripts/online_dqn_dryrun.py \
+  --host 127.0.0.1 \
+  --port 0 \
+  --rx-port 1 \
+  --duration 3600 \
+  --dt 1.0 \
+  --traffic-model sine_abrupt \
+  --upf-metrics-url http://192.168.90.1:8080/metrics \
+  --checkpoint ../upf-rl-env/checkpoints/dqn_mock_causal/final.pt \
+  --device cpu \
+  --force \
+  --csv runs/online_dqn_dryrun_guarded_1h/online_dqn_dryrun.csv \
+  --jsonl runs/online_dqn_dryrun_guarded_1h/online_dqn_dryrun.jsonl \
+  --tb runs/tensorboard/online_dqn_dryrun_guarded_1h
+```
+
+The important safety line printed by the script is
+
+```text
+DRY RUN MODE, actions are logged only. No pfcpctl call. No BESS or PFCP modification.
+```
+
+## Traffic model used in the validated run
+
+The traffic model was `sine_abrupt`.
+
+The controlled slices follow non synchronized sinusoidal patterns.
+
+```text
+Gold, smooth sinusoidal traffic
+Silver, smooth sinusoidal traffic with a different period
+Bronze, smooth sinusoidal traffic with a different period
+Noise, abrupt step like background perturbation
+```
+
+This provides two types of challenge for the agent.
+
+```text
+Predictable load variation from the controlled slices
+Abrupt hidden pressure from the Noise slice
+```
+
+The one hour validation confirmed that the controlled slices were not synchronized. The pairwise correlations between controlled offered traffic were low.
+
+```text
+Gold versus Silver correlation, 0.077
+Gold versus Bronze correlation, 0.065
+Silver versus Bronze correlation, -0.047
+```
+
+This is useful because the DQN is not simply observing one common aggregate wave. It must react to different slice phases and hidden noise pressure.
+
+## One hour guarded online dry run validation
+
+The final one hour online dry run produced
+
+```text
+3600 rows
+pfcp_sessions stayed at 4
+RX was positive for Gold, Silver, and Bronze
+n6_total_mbps was positive
+No NaN in required columns
+upf_access_drop_delta stayed at 0
+VALIDATION RESULT, PASS
+```
+
+This validates that the live telemetry path was stable for one hour.
+
+## Perturbation quality
+
+The Noise slice showed meaningful amplitude variation.
+
+```text
+Noise q10, 16.83 Mbps
+Noise q50, 21.27 Mbps
+Noise q90, 111.20 Mbps
+Noise q95, 125.59 Mbps
+Abrupt noise jumps above 20 Mbps, 40 events
+```
+
+This confirms that the hidden perturbation is not a flat background load. It contains abrupt bursts that can stress the policy.
+
+The spike and valley analysis showed that noise spikes increased aggregate pressure.
+
+```text
+Noise valleys
+mean noise offered, 15.30 Mbps
+mean n6 utilization, 0.163
+
+Noise spikes
+mean noise offered, 125.36 Mbps
+mean n6 utilization, 0.190
+```
+
+The effect on loss was modest in the average spike and valley comparison, but the one hour trace still contained high loss transients. These transients are important because they triggered the more aggressive raw DQN actions.
+
+## Raw DQN actions versus safe actions
+
+The raw DQN policy and the final safe policy were both logged.
+
+The raw DQN actions over one hour were
+
+```text
+A00, 2350 windows
+A02, 291 windows
+A12, 17 windows
+A13, 105 windows
+A14, 837 windows
+```
+
+The final safe actions after guardrail were
+
+```text
+A00, 2350 windows
+A02, 1242 windows
+A12, 1 window
+A13, 3 windows
+A14, 4 windows
+```
+
+The guardrail was applied in
+
+```text
+951 windows
+```
+
+This shows that the DQN still tries to reduce Gold aggressively in many situations, especially through A13 and A14. The guardrail prevented most of those actions from becoming final dry run actions.
+
+## Action meanings
+
+The relevant actions are
+
+```text
+A00, Gold 100 percent, Silver 100 percent, Bronze 100 percent
+A02, Gold 100 percent, Silver 100 percent, Bronze 70 percent
+A12, Gold 80 percent, Silver 30 percent, Bronze 30 percent
+A13, Gold 70 percent, Silver 30 percent, Bronze 30 percent
+A14, Gold 60 percent, Silver 30 percent, Bronze 30 percent
+```
+
+In MBR values, using nominal MBRs of Gold 200 Mbps, Silver 100 Mbps, Bronze 50 Mbps
+
+```text
+A00, 200000, 100000, 50000 kbps
+A02, 200000, 100000, 35000 kbps
+A12, 160000, 30000, 15000 kbps
+A13, 140000, 30000, 15000 kbps
+A14, 120000, 30000, 15000 kbps
+```
+
+## Guardrail policy
+
+The current guardrail protects Gold under low pressure.
+
+Current rule
+
+```text
+If n6_utilization < 0.70 and loss_gold < 0.10
+then block any action that reduces Gold
+and map it to A02
+```
+
+This means that when the scenario is light, the most aggressive allowed action is A02. A02 only reduces Bronze and preserves both Gold and Silver.
+
+The one hour validation confirmed
+
+```text
+No final Gold cutting action under light load
+A12 only passed when loss_gold was at least 0.10
+Unsafe Gold cutting actions were converted to A02
+```
+
+This is the main safety result before any real BESS actuation.
+
+## Remaining issue after one hour
+
+Although the guardrail passed validation, a few final A13 and A14 actions remained.
+
+They occurred only when Gold loss was already high.
+
+Examples
+
+```text
+step 820, loss_gold 0.173, final A14
+step 1161, loss_gold 0.139, final A14
+step 1473, loss_gold 0.129, final A13
+step 2070, loss_gold 0.159, final A13
+step 2343, loss_gold 0.112, final A14
+step 3183, loss_gold 0.193, final A13
+step 3524, loss_gold 0.136, final A14
+```
+
+These cases passed the current rule because `loss_gold >= 0.10`.
+
+However, these cases are still risky for the first real BESS control experiment, because the corresponding `n6_utilization` was low, between roughly 0.048 and 0.095, and Noise offered traffic was not high, around 18 to 24 Mbps.
+
+Interpretation
+
+```text
+The loss spike is real
+The DQN reacts aggressively
+But the low N6 utilization suggests these cases may be transient or measurement artifacts rather than congestion
+```
+
+## Recommended next safety patch
+
+Before enabling any BESS modification, cap the maximum final action to A12.
+
+Recommended rule
+
+```text
+Even under high loss
+do not allow A13 or A14 yet
+map A13 and A14 to A12
+```
+
+This means
+
+```text
+A13 becomes A12
+A14 becomes A12
+```
+
+The reason is that A12 is already aggressive enough for a first controlled experiment, because it reduces Gold to 80 percent and Silver and Bronze to 30 percent. A13 and A14 reduce Gold to 70 percent and 60 percent, which is too strong for the first actuation test.
+
+Expected validation after this patch
+
+```text
+Final safe actions should contain no A13 and no A14
+A12 may appear only when loss_gold >= 0.10
+A02 remains the fallback when the DQN tries to cut Gold under light load
+pfcp_sessions must remain 4
+No BESS or PFCP modification should occur during dry run
+```
+
+## Validation script
+
+A validation script was added
+
+```text
+scripts/validate_online_dryrun.py
+```
+
+It checks
+
+```text
+CSV row count
+NaN presence
+pfcp_sessions
+RX per controlled slice
+N6 throughput
+UPF access drops
+raw action distribution
+safe action distribution
+guardrail application
+guardrail correctness
+Noise amplitude and jumps
+slice synchronization
+spike and valley behavior
+action context
+```
+
+Run it with
+
+```bash
+python3 scripts/validate_online_dryrun.py \
+  --csv runs/online_dqn_dryrun_guarded_1h/online_dqn_dryrun.csv
+```
+
+A good result should end with
+
+```text
+VALIDATION RESULT, PASS
+```
+
+## Why this stage matters
+
+This stage is important because it separates three concerns.
+
+```text
+Telemetry validity
+The testbed is producing real online metrics.
+
+Policy behavior
+The DQN can consume live metrics and choose actions online.
+
+Operational safety
+The guardrail prevents unsafe Gold cuts before any BESS modification is allowed.
+```
+
+This is safer than directly connecting the DQN to BESS. It allows the policy and safety layer to be inspected using real conditions without modifying the datapath.
+
+## Current conclusion
+
+The experiment is ready for the next dry run patch, but not yet for unguarded BESS actuation.
+
+Current status
+
+```text
+Online telemetry is working
+DQN online inference is working
+Guarded action selection is working
+One hour validation passed
+BESS has not been modified by the DQN
+A13 and A14 should be capped to A12 before the first real control test
+```
+
+Recommended next step
+
+```text
+Patch the guardrail to cap A13 and A14 to A12
+Repeat the 420 second dry run
+Repeat the one hour validation
+Only then consider a tightly limited BESS actuation experiment
+```
+
+## First real BESS actuation should be limited
+
+When real actuation is enabled later, do not start with a fully autonomous 3600 second run.
+
+Recommended staged activation
+
+```text
+Stage 1, dry run with A13 and A14 capped to A12
+Stage 2, 120 second BESS actuation with logs and manual stop ready
+Stage 3, 420 second BESS actuation if Stage 2 is stable
+Stage 4, one hour BESS actuation only after automated validation passes
+```
+
+The first actuation test should log both
+
+```text
+raw_action_id
+safe_action_id
+applied_action_id
+intended_mbr_gold_kbps
+intended_mbr_silver_kbps
+intended_mbr_bronze_kbps
+actual_pfcp_sessions
+BESS QER counters
+TRex RX per PG ID
+UPF Prometheus counters
+```
+
+At this point, the correct interpretation is
+
+```text
+The DQN is ready to be tested as an online decision maker
+The guardrail is necessary
+Direct unguarded DQN control is not ready
+```
+

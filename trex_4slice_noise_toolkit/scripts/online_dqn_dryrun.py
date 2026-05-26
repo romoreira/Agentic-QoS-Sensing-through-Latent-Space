@@ -276,6 +276,7 @@ def main() -> int:
         "noise_offered_mbps", "noise_rx_mbps", "noise_loss",
         "pfcp_sessions", "upf_access_rx_mbps", "upf_access_drop_delta",
         "trex_total_tx_pkts", "trex_total_rx_pkts",
+        "dryrun_raw_action_id", "dryrun_safe_action_id", "dryrun_guardrail_applied",
         "dryrun_action_id", "dryrun_reward_diagnostic",
         "dryrun_intended_mbr_gold_kbps", "dryrun_intended_mbr_silver_kbps", "dryrun_intended_mbr_bronze_kbps",
         "dryrun_action_description",
@@ -352,17 +353,33 @@ def main() -> int:
                     x = torch.from_numpy(obs).unsqueeze(0).to(agent.device)
                     q_values = agent.online(x).squeeze(0).detach().cpu().numpy().astype(float).tolist()
 
-                intended_mbr = action_to_mbr_kbps(int(action), NOMINAL_MBR_KBPS)
+                raw_action = int(action)
+                raw_intended_mbr = action_to_mbr_kbps(raw_action, NOMINAL_MBR_KBPS)
+
+                safe_action = raw_action
+                guardrail_applied = False
+
+                # Conservative dry-run guardrail.
+                # In light-load conditions, do not allow actions that reduce Gold.
+                if float(row["n6_utilization"]) < 0.70 and float(row["loss_gold"]) < 0.10:
+                    if float(raw_intended_mbr[0]) < float(NOMINAL_MBR_KBPS[0]):
+                        safe_action = 2
+                        guardrail_applied = True
+
+                intended_mbr = action_to_mbr_kbps(int(safe_action), NOMINAL_MBR_KBPS)
                 reward, _components = compute_reward(metrics, int(action), prev_action, cfg_env)
                 prev_action = int(action)
                 last_action = int(action)
 
-                row["dryrun_action_id"] = int(action)
+                row["dryrun_raw_action_id"] = int(raw_action)
+                row["dryrun_safe_action_id"] = int(safe_action)
+                row["dryrun_guardrail_applied"] = int(guardrail_applied)
+                row["dryrun_action_id"] = int(safe_action)
                 row["dryrun_reward_diagnostic"] = float(reward)
                 row["dryrun_intended_mbr_gold_kbps"] = float(intended_mbr[0])
                 row["dryrun_intended_mbr_silver_kbps"] = float(intended_mbr[1])
                 row["dryrun_intended_mbr_bronze_kbps"] = float(intended_mbr[2])
-                row["dryrun_action_description"] = action_description(int(action))
+                row["dryrun_action_description"] = action_description(int(safe_action))
 
                 for col in fieldnames:
                     row.setdefault(col, "")
