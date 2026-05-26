@@ -359,12 +359,18 @@ def main() -> int:
                 safe_action = raw_action
                 guardrail_applied = False
 
-                # Conservative dry-run guardrail.
-                # In light-load conditions, do not allow actions that reduce Gold.
-                if float(row["n6_utilization"]) < 0.70 and float(row["loss_gold"]) < 0.10:
-                    if float(raw_intended_mbr[0]) < float(NOMINAL_MBR_KBPS[0]):
-                        safe_action = 2
-                        guardrail_applied = True
+                # Gold-preserving hierarchical guardrail.
+                # If the DQN asks for an action that would reduce Gold, never reduce Gold.
+                # First reduce Bronze. Reduce Silver only when Silver offered traffic is high enough.
+                #
+                # A04 = Gold 100%, Silver 100%, Bronze 30%.
+                # A06 = Gold 100%, Silver 70%,  Bronze 30%.
+                if float(raw_intended_mbr[0]) < float(NOMINAL_MBR_KBPS[0]):
+                    if float(row["offered_silver_mbps"]) > 70.0:
+                        safe_action = 6
+                    else:
+                        safe_action = 4
+                    guardrail_applied = True
 
                 intended_mbr = action_to_mbr_kbps(int(safe_action), NOMINAL_MBR_KBPS)
                 reward, _components = compute_reward(metrics, int(action), prev_action, cfg_env)

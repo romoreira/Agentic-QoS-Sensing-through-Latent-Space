@@ -137,8 +137,8 @@ class SineAbruptTrafficModelConfig:
     easier to inspect in TensorBoard than the stochastic model.
     """
     dt_s: float = 1.0
-    controlled_means_mbps: Sequence[float] = (145.0, 85.0, 38.0)
-    controlled_amps_mbps: Sequence[float] = (45.0, 32.0, 14.0)
+    controlled_means_mbps: Sequence[float] = (145.0, 85.0, 45.6)  # Bronze amplified by 1.2 for visible A02 effect
+    controlled_amps_mbps: Sequence[float] = (45.0, 32.0, 16.8)  # Bronze amplified by 1.2 for visible A02 effect
     controlled_periods_s: Sequence[float] = (300.0, 420.0, 260.0)
     controlled_phases_rad: Sequence[float] = (0.0, 2.094, 4.188)
     controlled_jitter_mbps: float = 0.8

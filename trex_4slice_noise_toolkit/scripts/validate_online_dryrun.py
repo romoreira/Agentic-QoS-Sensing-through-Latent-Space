@@ -140,8 +140,10 @@ def main():
 
     guarded = df[df["dryrun_guardrail_applied"] == 1]
     if len(guarded) > 0:
-        if guarded["dryrun_raw_action_id"].isin([12, 13, 14]).all() and (guarded["dryrun_action_id"] == 2).all():
-            ok("Guardrail converts unsafe Gold-cutting actions to A02")
+        raw_ok = guarded["dryrun_raw_action_id"].isin([9, 10, 11, 12, 13, 14]).all()
+        safe_ok = guarded["dryrun_action_id"].isin([4, 6]).all()
+        if raw_ok and safe_ok:
+            ok("Guardrail preserves Gold and maps Gold-cutting raw actions to hierarchical safe actions A04 or A06")
         else:
             fail("Guardrail applied but conversion pattern is unexpected", failures)
     else:
