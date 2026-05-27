@@ -41,6 +41,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Patch
 
 # ---------------------------------------------------------------------------
 # ACM-style global rcParams
@@ -462,23 +463,21 @@ def fig8_shortage_by_burst_regime(steps: pd.DataFrame, out_dir: Path) -> None:
     xs = np.arange(len(POLICY_ORDER))
     width = 0.36
 
-    # Quiet (left) — lighter; Burst (right) — solid
-    quiet_face = [POLICY_COLOR[p] for p in POLICY_ORDER]
-    burst_face = [POLICY_COLOR[p] for p in POLICY_ORDER]
+    # Each policy keeps its own hue; the two regimes are encoded by
+    # alpha (light = quiet, solid = burst).
+    policy_face = [POLICY_COLOR[p] for p in POLICY_ORDER]
 
     b1 = ax.bar(
         xs - width / 2, means["Quiet"].values, width=width,
-        yerr=stds["Quiet"].values, color=quiet_face, alpha=0.45,
+        yerr=stds["Quiet"].values, color=policy_face, alpha=0.45,
         edgecolor="black", linewidth=0.8, capsize=5,
         error_kw={"elinewidth": 1.0, "ecolor": "0.2"},
-        label="Quiet (hidden burst < 100 Mbps)",
     )
     b2 = ax.bar(
         xs + width / 2, means["Burst"].values, width=width,
-        yerr=stds["Burst"].values, color=burst_face, alpha=1.0,
+        yerr=stds["Burst"].values, color=policy_face, alpha=1.0,
         edgecolor="black", linewidth=0.8, capsize=5,
         error_kw={"elinewidth": 1.0, "ecolor": "0.2"},
-        label=f"Burst (hidden burst \u2265 {int(BURST_THRESHOLD_MBPS)} Mbps)",
     )
 
     # Numeric labels above each bar
@@ -496,8 +495,24 @@ def fig8_shortage_by_burst_regime(steps: pd.DataFrame, out_dir: Path) -> None:
     ax.set_xticklabels(POLICY_ORDER)
     style_axes(ax, xlabel="Policy", ylabel="Mean Gold shortage (Mbps)")
     all_top = np.nanmax(means.values + stds.values) if means.size else 1.0
-    ax.set_ylim(0, all_top * 1.22)
-    ax.legend(loc="upper right", fontsize=12)
+    # Extra headroom so the inside legend never collides with the tall bar
+    ax.set_ylim(0, all_top * 1.45)
+
+    # Neutral legend chips: hue is reserved for policy identity, so the
+    # legend only conveys what changes between regimes (alpha = saturation).
+    thr = int(BURST_THRESHOLD_MBPS)
+    legend_handles = [
+        Patch(facecolor="0.45", alpha=0.45, edgecolor="black", linewidth=0.8,
+              label=f"Quiet  (hidden burst < {thr} Mbps)"),
+        Patch(facecolor="0.45", alpha=1.0, edgecolor="black", linewidth=0.8,
+              label=f"Burst  (hidden burst \u2265 {thr} Mbps)"),
+    ]
+    ax.legend(
+        handles=legend_handles,
+        loc="upper right", fontsize=13,
+        frameon=True, framealpha=0.95, edgecolor="0.6",
+        handlelength=1.4, handleheight=1.0, borderpad=0.5,
+    )
     save_pdf(fig, out_dir, "fig8_shortage_by_burst_regime")
 
 
@@ -637,4 +652,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
