@@ -2,7 +2,7 @@
 """
 make_comparison_plots.py
 
-Generates 7 indispensable comparison plots between:
+Generates 10 comparison plots between:
   - Online DQN
   - Baseline fixed MBR
   - Baseline reactive threshold
@@ -13,7 +13,7 @@ Reads:
   <runs_root>/baseline_fixed/seed_*/...        (Fixed)
   <runs_root>/baseline_reactive/seed_*/...     (Reactive)
 
-Writes:
+Writes (PDF only):
   <out_dir>/fig1_headline_comparison.pdf
   <out_dir>/fig2_shortage_cdf.pdf
   <out_dir>/fig3_shortage_per_episode.pdf
@@ -21,6 +21,9 @@ Writes:
   <out_dir>/fig5_dqn_training_loss.pdf
   <out_dir>/fig6_action_distribution.pdf
   <out_dir>/fig7_dynamics_time_series.pdf
+  <out_dir>/fig8_shortage_by_burst_regime.pdf
+  <out_dir>/fig9_protection_score_cdf.pdf
+  <out_dir>/fig10_pareto_tradeoff.pdf
 
 Usage:
   python3 make_comparison_plots.py \
@@ -88,6 +91,13 @@ POLICY_COLOR = {
 }
 POLICY_ORDER = ["Fixed MBR", "Reactive", "DQN (online)"]
 
+# Marker per policy for scatter-style figures (Fig 10)
+POLICY_MARKER = {
+    "Fixed MBR":     "X",
+    "Reactive":      "s",
+    "DQN (online)":  "o",
+}
+
 # Map on-disk folder layout -> display label
 POLICY_DIRS = {
     "Fixed MBR":     "baseline_fixed",
@@ -96,6 +106,10 @@ POLICY_DIRS = {
 }
 
 FIG_W, FIG_H = 7.0, 4.2  # inches: ACM single-column-ish proportions
+
+# Threshold (Mbps) splitting the hidden-burst signal into quiet vs burst.
+# README: quiet ~30 Mbps; active burst 220-360 Mbps. 100 Mbps is a clean cut.
+BURST_THRESHOLD_MBPS = 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -182,11 +196,17 @@ def save_pdf(fig: plt.Figure, out_dir: Path, name: str) -> None:
     print(f"[ok] wrote {path}")
 
 
+def compute_protection_score(df: pd.DataFrame) -> pd.Series:
+    """gold_protection_score = 1 - shortage / offered_gold, clipped to [0, 1]."""
+    offered = df["offered_gold_mbps"].astype(float).replace(0, np.nan)
+    score = 1.0 - df["gold_shortage_mbps"] / offered
+    return score.clip(lower=0.0, upper=1.0).fillna(1.0)
+
+
 # ---------------------------------------------------------------------------
-# Figure 1 — Headline comparison: mean gold shortage (bars + 95% CI)
+# Figure 1 — Headline comparison: mean gold shortage (bars + std error bars)
 # ---------------------------------------------------------------------------
 def fig1_headline(steps: pd.DataFrame, out_dir: Path) -> None:
-    # Per-seed mean shortage, then mean ± std across seeds
     agg = (
         steps.groupby(["policy", "seed"])["gold_shortage_mbps"]
         .mean()
@@ -208,7 +228,6 @@ def fig1_headline(steps: pd.DataFrame, out_dir: Path) -> None:
         error_kw={"elinewidth": 1.2, "ecolor": "0.2"},
     )
 
-    # Numeric annotations above each bar
     for rect, m, s in zip(bars, means.values, stds.values):
         ax.text(
             rect.get_x() + rect.get_width() / 2.0,
@@ -292,7 +311,6 @@ def fig5_dqn_training_loss(episodes: pd.DataFrame, out_dir: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
     c = POLICY_COLOR["DQN (online)"]
-    # Faint per-seed lines + bold mean
     for col in piv.columns:
         ax.plot(piv.index, piv[col], color=c, alpha=0.25, linewidth=1.2)
     mu = piv.mean(axis=1).to_numpy()
@@ -309,7 +327,6 @@ def fig5_dqn_training_loss(episodes: pd.DataFrame, out_dir: Path) -> None:
 # Figure 6 — Action distribution per policy (stacked %)
 # ---------------------------------------------------------------------------
 def fig6_action_distribution(steps: pd.DataFrame, out_dir: Path) -> None:
-    # Stable, semantic order for stacking
     action_order = [
         "nominal",
         "cut_non_gold_light",
@@ -328,7 +345,6 @@ def fig6_action_distribution(steps: pd.DataFrame, out_dir: Path) -> None:
     counts = counts.reindex(index=POLICY_ORDER, columns=actions_present, fill_value=0)
     pct = counts.div(counts.sum(axis=1), axis=0) * 100.0
 
-    # Distinct, ordered colormap for actions (perceptually decent)
     cmap = plt.get_cmap("tab10")
     action_colors = {a: cmap(i % 10) for i, a in enumerate(actions_present)}
 
@@ -359,12 +375,6 @@ def fig6_action_distribution(steps: pd.DataFrame, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 def fig7_dynamics_time_series(steps: pd.DataFrame, out_dir: Path,
                               seed: str = "seed_007") -> None:
-    """
-    Shows, for the same seed, how each policy tracks offered Gold demand and
-    how much instantaneous shortage it generates.
-    Top panel  : offered Gold (shared signal) + available_for_gold per policy.
-    Bottom panel: gold_shortage_mbps per policy.
-    """
     sub = steps[steps.seed == seed].copy()
     if sub.empty:
         print(f"[warn] seed '{seed}' not found; skipping fig7")
@@ -375,7 +385,6 @@ def fig7_dynamics_time_series(steps: pd.DataFrame, out_dir: Path,
         2, 1, figsize=(FIG_W + 1.2, FIG_H * 1.6), sharex=True
     )
 
-    # --- Top: offered Gold (single ref line) + available_for_gold per policy ---
     any_policy = sub["policy"].iloc[0]
     t_offered = sub[sub.policy == any_policy].sort_values("step")
     ax_top.plot(
@@ -393,7 +402,6 @@ def fig7_dynamics_time_series(steps: pd.DataFrame, out_dir: Path,
     style_axes(ax_top, xlabel="", ylabel="Gold capacity (Mbps)")
     ax_top.legend(loc="upper right", ncol=2, fontsize=11)
 
-    # --- Bottom: shortage per policy ---
     for policy in POLICY_ORDER:
         s = sub[sub.policy == policy].sort_values("step")
         if s.empty:
@@ -406,6 +414,175 @@ def fig7_dynamics_time_series(steps: pd.DataFrame, out_dir: Path,
     ax_bot.legend(loc="upper right", ncol=3, fontsize=12)
 
     save_pdf(fig, out_dir, "fig7_dynamics_time_series")
+
+
+# ---------------------------------------------------------------------------
+# Figure 8 — Gold shortage conditional on hidden-burst regime
+# ---------------------------------------------------------------------------
+def fig8_shortage_by_burst_regime(steps: pd.DataFrame, out_dir: Path) -> None:
+    """
+    Splits each step into 'quiet' (hidden_burst < threshold) and 'burst'
+    (>= threshold), then plots grouped bars: shortage_mean per (policy, regime),
+    error bars = std across seeds.
+    """
+    df = steps.copy()
+    df["regime_bin"] = np.where(
+        df["hidden_burst_mbps"] >= BURST_THRESHOLD_MBPS, "Burst", "Quiet"
+    )
+
+    # Per-seed mean shortage in each (policy, regime)
+    per_seed = (
+        df.groupby(["policy", "regime_bin", "seed"])["gold_shortage_mbps"]
+        .mean()
+        .reset_index()
+    )
+    # Mean and std across seeds
+    means = (
+        per_seed.groupby(["policy", "regime_bin"])["gold_shortage_mbps"]
+        .mean()
+        .unstack("regime_bin")
+        .reindex(POLICY_ORDER)
+    )
+    stds = (
+        per_seed.groupby(["policy", "regime_bin"])["gold_shortage_mbps"]
+        .std(ddof=0)
+        .unstack("regime_bin")
+        .reindex(POLICY_ORDER)
+        .fillna(0.0)
+    )
+    # Ensure both regimes are columns even if one is missing
+    for col in ("Quiet", "Burst"):
+        if col not in means.columns:
+            means[col] = np.nan
+            stds[col] = 0.0
+    means = means[["Quiet", "Burst"]]
+    stds = stds[["Quiet", "Burst"]]
+
+    fig, ax = plt.subplots(figsize=(FIG_W + 0.5, FIG_H))
+    xs = np.arange(len(POLICY_ORDER))
+    width = 0.36
+
+    # Quiet (left) — lighter; Burst (right) — solid
+    quiet_face = [POLICY_COLOR[p] for p in POLICY_ORDER]
+    burst_face = [POLICY_COLOR[p] for p in POLICY_ORDER]
+
+    b1 = ax.bar(
+        xs - width / 2, means["Quiet"].values, width=width,
+        yerr=stds["Quiet"].values, color=quiet_face, alpha=0.45,
+        edgecolor="black", linewidth=0.8, capsize=5,
+        error_kw={"elinewidth": 1.0, "ecolor": "0.2"},
+        label="Quiet (hidden burst < 100 Mbps)",
+    )
+    b2 = ax.bar(
+        xs + width / 2, means["Burst"].values, width=width,
+        yerr=stds["Burst"].values, color=burst_face, alpha=1.0,
+        edgecolor="black", linewidth=0.8, capsize=5,
+        error_kw={"elinewidth": 1.0, "ecolor": "0.2"},
+        label=f"Burst (hidden burst \u2265 {int(BURST_THRESHOLD_MBPS)} Mbps)",
+    )
+
+    # Numeric labels above each bar
+    for group in (b1, b2):
+        for rect in group:
+            h = rect.get_height()
+            if np.isnan(h):
+                continue
+            ax.text(
+                rect.get_x() + rect.get_width() / 2.0, h + 3.0,
+                f"{h:.1f}", ha="center", va="bottom", fontsize=12,
+            )
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels(POLICY_ORDER)
+    style_axes(ax, xlabel="Policy", ylabel="Mean Gold shortage (Mbps)")
+    all_top = np.nanmax(means.values + stds.values) if means.size else 1.0
+    ax.set_ylim(0, all_top * 1.22)
+    ax.legend(loc="upper right", fontsize=12)
+    save_pdf(fig, out_dir, "fig8_shortage_by_burst_regime")
+
+
+# ---------------------------------------------------------------------------
+# Figure 9 — CDF of Gold Protection Score
+# ---------------------------------------------------------------------------
+def fig9_protection_score_cdf(steps: pd.DataFrame, out_dir: Path) -> None:
+    df = steps.copy()
+    df["protection_score"] = compute_protection_score(df)
+
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    for policy in POLICY_ORDER:
+        vals = np.sort(df.loc[df.policy == policy, "protection_score"].to_numpy())
+        if vals.size == 0:
+            continue
+        cdf = np.arange(1, vals.size + 1) / vals.size
+        ax.plot(vals, cdf, label=policy, color=POLICY_COLOR[policy])
+
+    ax.axvline(1.0, color="0.4", linestyle=":", linewidth=1.0)
+    ax.set_xlim(0, 1.0)
+    ax.set_ylim(0, 1.005)
+    style_axes(ax, xlabel="Gold protection score (1 \u2212 shortage / offered)",
+               ylabel="Empirical CDF")
+    ax.legend(loc="upper left")
+    save_pdf(fig, out_dir, "fig9_protection_score_cdf")
+
+
+# ---------------------------------------------------------------------------
+# Figure 10 — Pareto trade-off: Gold protection vs non-Gold throughput
+# ---------------------------------------------------------------------------
+def fig10_pareto_tradeoff(steps: pd.DataFrame, out_dir: Path) -> None:
+    """
+    For each (policy, seed):
+       x = mean non-Gold throughput delivered after MBR (Silver + Bronze) in Mbps
+       y = mean Gold protection score in [0, 1]
+    Better controllers are UP-RIGHT.
+    """
+    df = steps.copy()
+    df["non_gold_mbps"] = df["after_mbr_silver_mbps"] + df["after_mbr_bronze_mbps"]
+    df["protection_score"] = compute_protection_score(df)
+
+    per = (
+        df.groupby(["policy", "seed"])
+          .agg(non_gold_mbps=("non_gold_mbps", "mean"),
+               protection=("protection_score", "mean"))
+          .reset_index()
+    )
+
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+
+    # Per-seed points (small) + per-policy centroid (large)
+    for policy in POLICY_ORDER:
+        sub = per[per.policy == policy]
+        if sub.empty:
+            continue
+        c = POLICY_COLOR[policy]
+        m = POLICY_MARKER[policy]
+        ax.scatter(
+            sub["non_gold_mbps"], sub["protection"],
+            color=c, marker=m, s=60, alpha=0.55,
+            edgecolors="black", linewidths=0.7,
+        )
+        cx = sub["non_gold_mbps"].mean()
+        cy = sub["protection"].mean()
+        ax.scatter(
+            [cx], [cy], color=c, marker=m, s=220,
+            edgecolors="black", linewidths=1.2, label=policy, zorder=5,
+        )
+
+    # Indicate "better" direction with an arrow
+    ax.annotate(
+        "better", xy=(0.97, 0.97), xycoords="axes fraction",
+        xytext=(0.78, 0.78), textcoords="axes fraction",
+        fontsize=13, ha="center", va="center",
+        arrowprops=dict(arrowstyle="->", color="0.35", lw=1.2),
+    )
+
+    style_axes(
+        ax,
+        xlabel="Mean non-Gold throughput after MBR (Mbps)",
+        ylabel="Mean Gold protection score",
+    )
+    ax.set_ylim(0, 1.03)
+    ax.legend(loc="lower left")
+    save_pdf(fig, out_dir, "fig10_pareto_tradeoff")
 
 
 # ---------------------------------------------------------------------------
@@ -451,8 +628,11 @@ def main() -> None:
     fig5_dqn_training_loss(episodes, out_dir)
     fig6_action_distribution(steps, out_dir)
     fig7_dynamics_time_series(steps, out_dir, seed=args.ts_seed)
+    fig8_shortage_by_burst_regime(steps, out_dir)
+    fig9_protection_score_cdf(steps, out_dir)
+    fig10_pareto_tradeoff(steps, out_dir)
 
-    print("[done] 7 figures written to", out_dir)
+    print("[done] 10 figures written to", out_dir)
 
 
 if __name__ == "__main__":
