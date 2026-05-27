@@ -35,7 +35,8 @@ Expected root directory
 │   ├── scripts/
 │   │   ├── traffic_model.py
 │   │   ├── run_trex_dynamic_4slice.py
-│   │   └── online_dqn_proxy_train.py
+│   │   ├── online_dqn_proxy_train.py
+│   │   └── online_proxy_baseline.py
 │   ├── profiles/
 │   └── runs/
 └── upf-rl-env/
@@ -50,6 +51,7 @@ Main roles
 | `trex_4slice_noise_toolkit/setup_pfcpsim.sh` | Starts `pfcpsim`, associates PFCP, and creates the initial four sessions |
 | `trex_4slice_noise_toolkit/scripts/traffic_model.py` | Defines the four-slice traffic patterns |
 | `trex_4slice_noise_toolkit/scripts/online_dqn_proxy_train.py` | Online DQN training script with real PFCP MBR modification |
+| `trex_4slice_noise_toolkit/scripts/online_proxy_baseline.py` | Fixed and reactive baseline runner using the same traffic, proxy, and PFCP mechanism |
 | `trex_4slice_noise_toolkit/runs/` | Metrics, JSONL, episode summaries, and TensorBoard logs |
 
 ---
@@ -808,29 +810,307 @@ service --port 1
 
 ---
 
-## 🧪 Next recommended experiments
+## ✅ Completed baseline campaign
 
-Minimum comparison set for a paper-quality result
+The baseline campaign was completed to compare the online DQN controller against two non-learning policies under the same traffic model, same uplink capacity, same PFCP modification mechanism, and same seed structure.
+
+The final experiment directory is organized as follows.
 
 ```text
-1. Fixed nominal MBR baseline
-2. Reactive threshold baseline
-3. DQN proxy, seed 7
-4. DQN proxy, seed 13
-5. DQN proxy, seed 21
+runs/dqn_proxy_gold_100_200/
+├── seed_007/
+├── seed_013/
+├── seed_021/
+├── baseline_fixed/
+│   ├── seed_007/
+│   ├── seed_013/
+│   └── seed_021/
+└── baseline_reactive/
+    ├── seed_007/
+    ├── seed_013/
+    └── seed_021/
 ```
 
-Recommended primary metrics
+The folders `seed_007`, `seed_013`, and `seed_021` contain the online DQN runs.
+
+The folder `baseline_fixed` contains the static MBR baseline.
+
+The folder `baseline_reactive` contains the threshold-based reactive baseline.
+
+Each run stores the same artifacts.
+
+```text
+metrics.csv
+metrics.jsonl
+episodes.csv
+tensorboard/
+```
+
+---
+
+## 🧪 What the baselines mean
+
+The baselines are used to answer whether the learned DQN policy is better than simpler control strategies.
+
+All policies use the same four-slice traffic pattern.
+
+```text
+Gold     critical traffic, approximately 100 to 200 Mbps
+Silver   heavy competing traffic
+Bronze   medium competing traffic
+Noise    hidden burst pressure
+```
+
+All policies use the same shared uplink proxy model.
+
+```text
+uplink capacity = 200 Mbps
+```
+
+All policies are evaluated with the same main protection metric.
+
+```text
+gold_shortage_mbps
+```
+
+A lower Gold shortage means better protection of the critical Gold slice.
+
+---
+
+## 🧪 Baseline 0, fixed MBR
+
+The fixed baseline keeps the initial slice MBRs unchanged during the whole run.
+
+```text
+Gold    200 Mbps
+Silver  100 Mbps
+Bronze   50 Mbps
+Noise    50 Mbps
+```
+
+This baseline represents a traditional static QoS configuration.
+
+It answers the question
+
+```text
+What happens if the network operator configures slice MBRs once and never adapts them?
+```
+
+Expected behavior
+
+```text
+When Gold demand is low, this baseline can be acceptable.
+
+When Gold demand rises, Silver, Bronze, and Noise can still consume part of the shared uplink.
+
+Because the MBRs never change, the fixed baseline cannot reserve extra capacity for Gold before congestion occurs.
+
+Therefore, Gold shortage can become high during Gold peaks or hidden burst periods.
+```
+
+Why it is fair
+
+```text
+It uses the same initial MBRs installed by the PFCP session setup.
+
+It represents the simplest realistic operator policy.
+
+It does not receive any learning advantage or future information.
+```
+
+Main limitation
+
+```text
+It cannot react to traffic variation.
+```
+
+---
+
+## 🧪 Baseline 1, reactive threshold
+
+The reactive baseline uses deterministic rules to select one of the same MBR actions available to the DQN.
+
+It observes the current pressure and current Gold shortage, then reacts using thresholds.
+
+Example behavior
+
+```text
+If Gold shortage is already visible, cut Silver and Bronze strongly.
+
+If uplink pressure is high, cut Silver and Bronze moderately.
+
+If Gold demand is low and pressure is low, restore non-critical slices.
+```
+
+This baseline answers the question
+
+```text
+Can a simple rule-based controller protect Gold without reinforcement learning?
+```
+
+Why it is stronger than fixed MBR
+
+```text
+It can change MBRs during the experiment.
+
+It can reduce Silver and Bronze when the shared uplink is already under pressure.
+
+It uses the same action space as the DQN.
+```
+
+Why it is still limited
+
+```text
+It is reactive, not predictive.
+
+It usually acts after pressure or Gold shortage is already visible.
+
+It does not learn the temporal pattern of Gold, Silver, Bronze, or hidden burst behavior.
+
+It does not improve with experience.
+```
+
+Why it is fair
+
+```text
+It is simple, deterministic, and auditable.
+
+It uses the same proxy measurements as the DQN.
+
+It does not use hidden future information.
+
+It provides a stronger comparison than fixed MBR.
+```
+
+---
+
+## 🧠 Online DQN policy in the final comparison
+
+The online DQN policy learns from interaction with the running testbed.
+
+It uses normalized observations internally, while the original metrics remain saved in Mbps, kbps, reward, loss, pressure, and shortage for plotting and analysis.
+
+The DQN chooses among the same MBR actions used by the reactive baseline.
+
+Its advantage is that it can learn which actions tend to protect Gold under recurring traffic phases.
+
+The DQN answers the question
+
+```text
+Can a learning controller anticipate the temporal demand pattern and reserve uplink capacity for Gold more effectively than fixed or reactive control?
+```
+
+Expected behavior
+
+```text
+When Gold demand is low, the DQN can allow more capacity for Silver and Bronze.
+
+When Gold starts rising, the DQN can reduce Silver and Bronze before severe Gold shortage occurs.
+
+When hidden burst pressure appears, the DQN can favor stronger non-Gold cuts.
+
+Over time, the DQN should reduce Gold shortage and make reward less negative.
+```
+
+---
+
+## 🏃 Run baseline campaigns
+
+The baselines use `scripts/online_proxy_baseline.py`.
+
+Run all baseline seeds with the same seed set used by the DQN.
+
+```bash
+cd ~/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit
+
+export PYTHONPATH=/opt/trex/v3.08/automation/trex_control_plane/interactive:$PYTHONPATH
+
+for SEED in 7 13 21; do
+  SEED_PAD=$(printf "%03d" "$SEED")
+
+  mkdir -p runs/dqn_proxy_gold_100_200/baseline_fixed/seed_${SEED_PAD}
+
+  python3 scripts/online_proxy_baseline.py \
+    --policy fixed_mbr \
+    --duration 900 \
+    --dt 1 \
+    --episode-steps 60 \
+    --uplink-capacity-mbps 200 \
+    --seed "$SEED" \
+    --force \
+    --csv runs/dqn_proxy_gold_100_200/baseline_fixed/seed_${SEED_PAD}/metrics.csv \
+    --jsonl runs/dqn_proxy_gold_100_200/baseline_fixed/seed_${SEED_PAD}/metrics.jsonl \
+    --episodes-csv runs/dqn_proxy_gold_100_200/baseline_fixed/seed_${SEED_PAD}/episodes.csv \
+    --tb runs/dqn_proxy_gold_100_200/baseline_fixed/seed_${SEED_PAD}/tensorboard
+
+  mkdir -p runs/dqn_proxy_gold_100_200/baseline_reactive/seed_${SEED_PAD}
+
+  python3 scripts/online_proxy_baseline.py \
+    --policy reactive_threshold \
+    --duration 900 \
+    --dt 1 \
+    --episode-steps 60 \
+    --uplink-capacity-mbps 200 \
+    --seed "$SEED" \
+    --force \
+    --csv runs/dqn_proxy_gold_100_200/baseline_reactive/seed_${SEED_PAD}/metrics.csv \
+    --jsonl runs/dqn_proxy_gold_100_200/baseline_reactive/seed_${SEED_PAD}/metrics.jsonl \
+    --episodes-csv runs/dqn_proxy_gold_100_200/baseline_reactive/seed_${SEED_PAD}/episodes.csv \
+    --tb runs/dqn_proxy_gold_100_200/baseline_reactive/seed_${SEED_PAD}/tensorboard
+done
+```
+
+Open only the baselines in TensorBoard.
+
+```bash
+tensorboard \
+  --logdir_spec="fixed:runs/dqn_proxy_gold_100_200/baseline_fixed,reactive:runs/dqn_proxy_gold_100_200/baseline_reactive" \
+  --host 0.0.0.0
+```
+
+Open the full comparison, including DQN and baselines.
+
+```bash
+tensorboard --logdir runs/dqn_proxy_gold_100_200 --host 0.0.0.0
+```
+
+---
+
+## 📊 Final comparison logic
+
+The three policies should be interpreted as follows.
+
+| Policy | Learns over time | Changes MBR online | Anticipates traffic phase | Expected Gold protection |
+|---|---:|---:|---:|---:|
+| Fixed MBR | No | No | No | Lowest |
+| Reactive threshold | No | Yes | No | Intermediate |
+| Online DQN | Yes | Yes | Yes | Highest |
+
+Expected ranking
+
+```text
+Fixed MBR        highest Gold shortage
+Reactive         intermediate Gold shortage
+DQN online       lowest Gold shortage in later episodes
+```
+
+---
+
+## 📈 Metrics for final plots
+
+Recommended metrics for the final comparison
 
 ```text
 gold_shortage_sum per episode
-gold_shortage_mbps over time
 reward_mean per episode
 loss_mean per episode
+mean gold_shortage_mbps
 Gold protection score
-uplink pressure and utilization
-MBR actions over time
+uplink pressure
+uplink utilization
 action distribution
+MBR evolution over time
+hidden burst versus Gold shortage
 ```
 
 Recommended derived metric
@@ -839,11 +1119,86 @@ Recommended derived metric
 gold_protection_score = 1.0 - gold_shortage_mbps / offered_gold_mbps
 ```
 
+Interpretation
+
+```text
+gold_protection_score close to 1 means Gold was protected.
+
+gold_protection_score close to 0 means Gold was severely affected.
+```
+
 ---
+
+## 🔎 Final summary script
+
+Use this script to compare DQN, fixed baseline, and reactive baseline.
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import pandas as pd
+
+root = Path("runs/dqn_proxy_gold_100_200")
+
+rows = []
+
+for f in root.glob("seed_*/episodes.csv"):
+    seed = f.parent.name
+    df = pd.read_csv(f)
+    rows.append({
+        "policy": "dqn_online",
+        "seed": seed,
+        "episodes": len(df),
+        "reward_mean_last3": df.tail(3)["reward_mean"].mean(),
+        "gold_shortage_sum_last3": df.tail(3)["gold_shortage_sum"].mean(),
+        "gold_shortage_sum_total": df["gold_shortage_sum"].sum(),
+    })
+
+for policy_dir in ["baseline_fixed", "baseline_reactive"]:
+    for f in (root / policy_dir).glob("seed_*/episodes.csv"):
+        seed = f.parent.name
+        df = pd.read_csv(f)
+        rows.append({
+            "policy": policy_dir,
+            "seed": seed,
+            "episodes": len(df),
+            "reward_mean_last3": df.tail(3)["reward_mean"].mean(),
+            "gold_shortage_sum_last3": df.tail(3)["gold_shortage_sum"].mean(),
+            "gold_shortage_sum_total": df["gold_shortage_sum"].sum(),
+        })
+
+out = pd.DataFrame(rows).sort_values(["policy", "seed"])
+print(out.round(2).to_string(index=False))
+
+print("\nAggregate by policy")
+print(
+    out.groupby("policy")[
+        ["reward_mean_last3", "gold_shortage_sum_last3", "gold_shortage_sum_total"]
+    ]
+    .agg(["mean", "std"])
+    .round(2)
+)
+PY
+```
+
+---
+
+## 📌 Final interpretation
+
+The fixed baseline shows the weakness of static slice configuration.
+
+The reactive baseline shows how much can be gained with simple online rules.
+
+The online DQN shows whether learning the traffic pattern provides additional benefit.
+
+A strong result is obtained when the DQN has lower Gold shortage than both baselines, especially in later episodes and during hidden burst periods.
+
+This comparison makes the experiment suitable for reporting as an adaptive QoS control result over a real BESS UPF and TRex testbed, with real PFCP session modification and reproducible per-seed logs.
+
 
 ## 📝 Short experiment summary
 
 This experiment implements an online DQN controller for adaptive QoS enforcement in a BESS-based UPF. TRex generates four GTP-U slices, Gold, Silver, Bronze, and Noise. The Gold slice is critical and varies between approximately 100 and 200 Mbps. Silver and Bronze generate competing traffic, while Noise creates hidden burst pressure.
 
-Because TRex RX PGID counters cannot attribute packets after GTP-U decapsulation, the controller uses a proxy based on offered load, active MBRs, and shared uplink capacity. The DQN applies real PFCP `session modify` commands to change slice MBRs online. The first validated 900 s run showed decreasing training loss, improved reward, and reduced Gold shortage, indicating that the controller learned to reserve uplink capacity for the critical Gold slice.
+Because TRex RX PGID counters cannot attribute packets after GTP-U decapsulation, the controller uses a proxy based on offered load, active MBRs, and shared uplink capacity. The DQN applies real PFCP `session modify` commands to change slice MBRs online. The validated DQN campaign showed decreasing training loss, improved reward, and reduced Gold shortage, indicating that the controller learned to reserve uplink capacity for the critical Gold slice. The completed baseline campaign adds a fixed MBR baseline and a reactive threshold baseline, enabling a fair comparison between static control, rule-based online control, and learned online control.
 
