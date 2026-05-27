@@ -1,3 +1,0 @@
-# Optional. The scripts work with CSV only if torch/tensorboard is absent.
-torch
-tensorboard

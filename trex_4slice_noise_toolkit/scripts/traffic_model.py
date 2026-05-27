@@ -225,6 +225,51 @@ def make_traffic_model(kind: str, dt_s: float, seed: Optional[int] = None):
     kind = (kind or "stochastic").strip().lower().replace("-", "_")
     if kind in ("sine", "sine_abrupt", "sine_noise", "curriculum"):
         return SineAbruptTrafficModel(SineAbruptTrafficModelConfig(dt_s=dt_s), seed=seed)
+
+    if kind in ("sine_stress", "stress", "stress_sine"):
+        return SineAbruptTrafficModel(
+            SineAbruptTrafficModelConfig(
+                dt_s=dt_s,
+                controlled_means_mbps=(180.0, 120.0, 70.0),
+                controlled_amps_mbps=(70.0, 50.0, 30.0),
+                noise_active_min_mbps=120.0,
+                noise_active_max_mbps=220.0,
+            ),
+            seed=seed,
+        )
+
+    if kind in ("sine_overload", "overload", "stress_plus"):
+        return SineAbruptTrafficModel(
+            SineAbruptTrafficModelConfig(
+                dt_s=dt_s,
+                controlled_means_mbps=(230.0, 160.0, 95.0),
+                controlled_amps_mbps=(90.0, 70.0, 40.0),
+                noise_active_min_mbps=220.0,
+                noise_active_max_mbps=360.0,
+                noise_base_mbps=30.0,
+            ),
+            seed=seed,
+        )
+
+    if kind in ("sine_gold_safe_overload", "gold_safe_overload", "gold_safe"):
+        return SineAbruptTrafficModel(
+            SineAbruptTrafficModelConfig(
+                dt_s=dt_s,
+                # Gold remains mostly within its nominal 200 Mbps MBR.
+                # Silver, Bronze and Noise create the aggregate pressure.
+                # Gold is the critical slice.
+                # It now spans roughly 100--200 Mbps, creating low-demand
+                # valleys where non-critical slices can receive capacity and
+                # high-demand peaks where the controller must reserve uplink.
+                controlled_means_mbps=(150.0, 210.0, 140.0),
+                controlled_amps_mbps=(50.0, 90.0, 60.0),
+                noise_active_min_mbps=220.0,
+                noise_active_max_mbps=360.0,
+                noise_base_mbps=30.0,
+            ),
+            seed=seed,
+        )
+
     if kind in ("stochastic", "default", "ar_burst"):
         return FourSliceTrafficModel(TrafficModelConfig(dt_s=dt_s), seed=seed)
     raise ValueError(f"unknown traffic model: {kind}")

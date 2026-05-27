@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--duration", type=float, default=300.0)
     p.add_argument("--dt", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=7)
-    p.add_argument("--traffic-model", default="sine_abrupt", choices=["stochastic", "sine_abrupt"])
+    p.add_argument("--traffic-model", default="sine_abrupt", choices=["stochastic", "sine_abrupt", "sine_stress", "sine_overload", "sine_gold_safe_overload"])
     p.add_argument("--upf-metrics-url", default="http://192.168.90.1:8080/metrics")
     p.add_argument("--n6-capacity-mbps", type=float, default=1000.0)
     p.add_argument("--checkpoint", required=True, help="DQN checkpoint, e.g., ../upf-rl-env/checkpoints/dqn_real_csv/final.pt")
@@ -187,6 +187,43 @@ def row_from_window(
 
         row[f"traffic_target_{s}_pps"] = float(pps_by_name.get(s, 0.0))
 
+    row["telemetry_fallback"] = 0
+    row["telemetry_fallback_reason"] = ""
+
+    # Proxy telemetry mode:
+    # TRex PGID RX cannot be used after GTP-U decapsulation, but TRex PGID TX
+    # still gives the offered load per slice. Since the controller installs the
+    # MBRs, we derive a deterministic per-slice excess proxy:
+    #
+    #   proxy_excess_mbps = max(0, offered_mbps - installed_mbr_mbps)
+    #
+    # This is not measured RX per slice. It is a control-plane loss proxy used
+    # for online reward and diagnostics.
+    for idx, name in enumerate(VISIBLE):
+        offered = float(target_mbps.get(name, 0.0))
+        mbr_mbps = float(actual_mbr_kbps[idx]) / 1000.0
+        proxy_rx = min(offered, mbr_mbps)
+        proxy_excess = max(0.0, offered - mbr_mbps)
+        proxy_loss = proxy_excess / max(offered, 1e-9)
+
+        row[f"proxy_mbr_{name}_mbps"] = float(mbr_mbps)
+        row[f"proxy_rx_{name}_mbps"] = float(proxy_rx)
+        row[f"proxy_excess_{name}_mbps"] = float(proxy_excess)
+        row[f"proxy_loss_{name}"] = float(proxy_loss)
+
+        row[f"rx_{name}_mbps"] = float(proxy_rx)
+        row[f"loss_{name}"] = float(proxy_loss)
+        row[f"qer_red_{name}"] = float(proxy_loss)
+
+    # Noise is generated and traverses the same N6 path, but the current action
+    # vector controls only the visible slices. Keep the previous measured or
+    # zero-valued fields for noise, and add offered-only proxy diagnostics.
+    noise_offered = float(target_mbps.get("noise", 0.0))
+    row["proxy_offered_noise_mbps"] = float(noise_offered)
+
+    row["telemetry_fallback"] = 1
+    row["telemetry_fallback_reason"] = "control_plane_mbr_proxy"
+
     row["mbr_gold_kbps"] = float(actual_mbr_kbps[0])
     row["mbr_silver_kbps"] = float(actual_mbr_kbps[1])
     row["mbr_bronze_kbps"] = float(actual_mbr_kbps[2])
@@ -271,11 +308,16 @@ def main() -> int:
         "rx_gold_mbps", "rx_silver_mbps", "rx_bronze_mbps",
         "loss_gold", "loss_silver", "loss_bronze",
         "qer_red_gold", "qer_red_silver", "qer_red_bronze",
+        "proxy_mbr_gold_mbps", "proxy_mbr_silver_mbps", "proxy_mbr_bronze_mbps",
+        "proxy_rx_gold_mbps", "proxy_rx_silver_mbps", "proxy_rx_bronze_mbps",
+        "proxy_excess_gold_mbps", "proxy_excess_silver_mbps", "proxy_excess_bronze_mbps",
+        "proxy_loss_gold", "proxy_loss_silver", "proxy_loss_bronze",
+        "proxy_offered_noise_mbps",
         "n6_total_mbps", "n6_utilization",
         "mbr_gold_kbps", "mbr_silver_kbps", "mbr_bronze_kbps",
         "noise_offered_mbps", "noise_rx_mbps", "noise_loss",
         "pfcp_sessions", "upf_access_rx_mbps", "upf_access_drop_delta",
-        "trex_total_tx_pkts", "trex_total_rx_pkts",
+        "trex_total_tx_pkts", "trex_total_rx_pkts", "telemetry_fallback", "telemetry_fallback_reason",
         "dryrun_raw_action_id", "dryrun_safe_action_id", "dryrun_guardrail_applied",
         "dryrun_action_id", "dryrun_reward_diagnostic",
         "dryrun_intended_mbr_gold_kbps", "dryrun_intended_mbr_silver_kbps", "dryrun_intended_mbr_bronze_kbps",

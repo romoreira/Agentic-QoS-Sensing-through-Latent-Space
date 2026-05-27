@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import os
+import random
+import subprocess
+import sys
+import time
+from collections import deque
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+except Exception as exc:
+    raise SystemExit(f"PyTorch is required: {exc}")
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from traffic_model import make_traffic_model, SLICE_NAMES
+from run_trex_dynamic_4slice import import_trex, build_streams
+
+VISIBLE = ["gold", "silver", "bronze"]
+NOISE_MBR_KBPS = 50000.0
+SESSION_MBR_KBPS = 1000000.0
+
+DEFAULT_MBR = np.array([200000.0, 100000.0, 50000.0], dtype=np.float32)
+
+ACTIONS = [
+    ("nominal",               [200000, 100000, 50000]),
+    ("protect_gold_light",    [220000,  80000, 40000]),
+    ("protect_gold_medium",   [240000,  70000, 30000]),
+    ("protect_gold_strong",   [260000,  50000, 20000]),
+    ("restore_silver",       [220000, 100000, 30000]),
+    ("restore_bronze",       [220000,  70000, 50000]),
+    ("economy_non_gold",     [200000,  60000, 20000]),
+    ("max_gold",             [300000,  40000, 10000]),
+]
+ACTION_MBR = np.array([a[1] for a in ACTIONS], dtype=np.float32)
+
+
+class QNet(nn.Module):
+    def __init__(self, obs_dim: int, n_actions: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, n_actions),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Replay:
+    def __init__(self, capacity: int):
+        self.buf = deque(maxlen=capacity)
+
+    def add(self, item):
+        self.buf.append(item)
+
+    def sample(self, batch_size: int):
+        batch = random.sample(self.buf, batch_size)
+        s, a, r, ns, d = zip(*batch)
+        return (
+            torch.tensor(np.array(s), dtype=torch.float32),
+            torch.tensor(a, dtype=torch.long),
+            torch.tensor(r, dtype=torch.float32),
+            torch.tensor(np.array(ns), dtype=torch.float32),
+            torch.tensor(d, dtype=torch.float32),
+        )
+
+    def __len__(self):
+        return len(self.buf)
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--sync-port", type=int, default=4501)
+    p.add_argument("--port", type=int, default=0)
+    p.add_argument("--rx-port", type=int, default=1)
+    p.add_argument("--duration", type=float, default=180.0)
+    p.add_argument("--dt", type=float, default=1.0)
+    p.add_argument("--episode-steps", type=int, default=60)
+    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--traffic-model", default="sine_gold_safe_overload",
+                   choices=["stochastic", "sine_abrupt", "sine_stress", "sine_overload", "sine_gold_safe_overload"])
+    p.add_argument("--wire-overhead-bytes", type=int, default=20)
+    p.add_argument("--n6-capacity-mbps", type=float, default=1000.0)
+    p.add_argument("--csv", default="runs/online_proxy_train.csv")
+    p.add_argument("--jsonl", default="runs/online_proxy_train.jsonl")
+    p.add_argument("--episodes-csv", default="runs/online_proxy_episodes.csv")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--epsilon-start", type=float, default=0.40)
+    p.add_argument("--epsilon-end", type=float, default=0.05)
+    p.add_argument("--epsilon-decay-steps", type=int, default=600)
+    p.add_argument("--gamma", type=float, default=0.90)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--replay-size", type=int, default=5000)
+    p.add_argument("--warmup-steps", type=int, default=20)
+    p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    p.add_argument("--no-apply", action="store_true", help="train and log, but do not call pfcpctl modify")
+    return p.parse_args()
+
+
+def epsilon_by_step(args, step: int) -> float:
+    frac = min(1.0, step / max(args.epsilon_decay_steps, 1))
+    return args.epsilon_start + frac * (args.epsilon_end - args.epsilon_start)
+
+
+def make_obs(offered: Dict[str, float], mbr_kbps: np.ndarray, n6_util: float) -> np.ndarray:
+    vals = []
+    for i, name in enumerate(VISIBLE):
+        offered_mbps = float(offered.get(name, 0.0))
+        mbr_mbps = float(mbr_kbps[i]) / 1000.0
+        excess = max(0.0, offered_mbps - mbr_mbps)
+        vals += [
+            offered_mbps / 300.0,
+            mbr_mbps / 300.0,
+            excess / 300.0,
+        ]
+    vals += [
+        float(offered.get("noise", 0.0)) / 300.0,
+        float(n6_util),
+    ]
+    return np.array(vals, dtype=np.float32)
+
+
+def proxy_metrics(offered: Dict[str, float], mbr_kbps: np.ndarray) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for i, name in enumerate(VISIBLE):
+        offered_mbps = float(offered.get(name, 0.0))
+        mbr_mbps = float(mbr_kbps[i]) / 1000.0
+        rx_proxy = min(offered_mbps, mbr_mbps)
+        excess = max(0.0, offered_mbps - mbr_mbps)
+        loss = excess / max(offered_mbps, 1e-9)
+        out[f"proxy_mbr_{name}_mbps"] = mbr_mbps
+        out[f"proxy_rx_{name}_mbps"] = rx_proxy
+        out[f"proxy_excess_{name}_mbps"] = excess
+        out[f"proxy_loss_{name}"] = loss
+    return out
+
+
+def compute_reward(pm: Dict[str, float], mbr_kbps: np.ndarray, prev_mbr_kbps: np.ndarray, n6_util: float) -> float:
+    gold = pm["proxy_excess_gold_mbps"]
+    silver = pm["proxy_excess_silver_mbps"]
+    bronze = pm["proxy_excess_bronze_mbps"]
+
+    delta = float(np.abs(mbr_kbps - prev_mbr_kbps).sum()) / 100000.0
+
+    non_gold_cut = max(0.0, (DEFAULT_MBR[1] - mbr_kbps[1]) / 100000.0)
+    non_gold_cut += max(0.0, (DEFAULT_MBR[2] - mbr_kbps[2]) / 50000.0)
+
+    return float(
+        - 5.0 * gold
+        - 1.0 * silver
+        - 0.5 * bronze
+        - 0.2 * delta
+        - 0.1 * non_gold_cut
+        + 5.0 * min(max(n6_util, 0.0), 1.0)
+    )
+
+
+def apply_mbr(mbr_kbps: np.ndarray) -> Tuple[int, str]:
+    gold, silver, bronze = [int(x) for x in mbr_kbps]
+    app = f"{gold},{silver},{bronze},{int(NOISE_MBR_KBPS)}"
+    sess = ",".join([str(int(SESSION_MBR_KBPS))] * 4)
+
+    cmd = [
+        "sudo", "docker", "exec", "pfcpsim",
+        "pfcpctl", "-s", "localhost:12345", "session", "modify",
+        "--count", "4",
+        "--baseID", "1",
+        "--ue-pool", "10.250.0.0/24",
+        "--gnb-addr", "192.168.70.2",
+        "--app-filter", "udp:any:any:allow:100",
+        "--session-mbr-uplink", sess,
+        "--session-mbr-downlink", sess,
+        "--app-mbr-uplink", app,
+        "--app-mbr-downlink", app,
+    ]
+
+    p = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return p.returncode, p.stdout.strip()
+
+
+def get_total_rx_tx(stats: Dict[str, Any]) -> Tuple[float, float]:
+    total_tx = 0.0
+    total_rx = 0.0
+    for port in [0, 1]:
+        ps = stats.get(port, stats.get(str(port), {}))
+        if isinstance(ps, dict):
+            total_tx += float(ps.get("opackets", 0.0))
+            total_rx += float(ps.get("ipackets", 0.0))
+    return total_tx, total_rx
+
+
+def json_safe(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {str(k): json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [json_safe(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(json_safe(v) for v in obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, float) and math.isnan(obj):
+        return None
+    return obj
+
+
+def main() -> int:
+    args = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
+    if device == "auto":
+        device = "cpu"
+
+    Path(args.csv).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.jsonl).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.episodes_csv).parent.mkdir(parents=True, exist_ok=True)
+
+    model = make_traffic_model(args.traffic_model, dt_s=args.dt, seed=args.seed)
+
+    api = import_trex()
+    STLClient = api[0]
+    client = STLClient(server=args.host, sync_port=args.sync_port)
+    client.connect()
+    client.acquire(ports=[args.port, args.rx_port], force=args.force)
+
+    q = QNet(obs_dim=11, n_actions=len(ACTIONS)).to(device)
+    target = QNet(obs_dim=11, n_actions=len(ACTIONS)).to(device)
+    target.load_state_dict(q.state_dict())
+    opt = optim.Adam(q.parameters(), lr=args.lr)
+    replay = Replay(args.replay_size)
+
+    current_mbr = DEFAULT_MBR.copy()
+    prev_mbr = current_mbr.copy()
+
+    if not args.no_apply:
+        rc, out = apply_mbr(current_mbr)
+        print(f"Initial MBR apply rc={rc}: {out}")
+
+    fieldnames = [
+        "step", "episode", "episode_step", "t_s", "regime",
+        "action_id", "action_name", "epsilon", "reward", "train_loss",
+        "offered_gold_mbps", "offered_silver_mbps", "offered_bronze_mbps", "noise_offered_mbps",
+        "mbr_gold_kbps", "mbr_silver_kbps", "mbr_bronze_kbps",
+        "proxy_mbr_gold_mbps", "proxy_mbr_silver_mbps", "proxy_mbr_bronze_mbps",
+        "proxy_rx_gold_mbps", "proxy_rx_silver_mbps", "proxy_rx_bronze_mbps",
+        "proxy_excess_gold_mbps", "proxy_excess_silver_mbps", "proxy_excess_bronze_mbps",
+        "proxy_loss_gold", "proxy_loss_silver", "proxy_loss_bronze",
+        "n6_total_mbps", "n6_utilization",
+        "trex_total_tx_pkts", "trex_total_rx_pkts",
+        "pfcp_modify_rc", "pfcp_modify_output",
+    ]
+
+    ep_fieldnames = ["episode", "start_step", "end_step", "reward_sum", "reward_mean", "loss_mean"]
+
+    last_obs = None
+    last_action = None
+    last_reward = None
+
+    episode_rewards: List[float] = []
+    episode_losses: List[float] = []
+    episode = 0
+    episode_start = 0
+
+    try:
+        with open(args.csv, "w", newline="") as f_csv, open(args.jsonl, "w") as f_jsonl, open(args.episodes_csv, "w", newline="") as f_ep:
+            writer = csv.DictWriter(f_csv, fieldnames=fieldnames)
+            writer.writeheader()
+            ep_writer = csv.DictWriter(f_ep, fieldnames=ep_fieldnames)
+            ep_writer.writeheader()
+
+            for sample in model.iter_duration(args.duration):
+                step = int(sample.step)
+                episode = step // max(args.episode_steps, 1)
+                episode_step = step % max(args.episode_steps, 1)
+
+                offered = {k: float(v) for k, v in sample.mbps.items()}
+
+                client.stop(ports=[args.port])
+                client.reset(ports=[args.port])
+                streams, pps_by_name, packet_len_by_name = build_streams(api, offered, args.wire_overhead_bytes)
+                client.add_streams(streams=streams, ports=[args.port])
+                client.clear_stats()
+                client.start(ports=[args.port], duration=args.dt)
+                time.sleep(max(args.dt, 0.05))
+
+                stats = client.get_stats()
+                total_tx_pkts, total_rx_pkts = get_total_rx_tx(stats)
+
+                pm = proxy_metrics(offered, current_mbr)
+                n6_total_mbps = sum(pm[f"proxy_rx_{s}_mbps"] for s in VISIBLE) + min(float(offered.get("noise", 0.0)), NOISE_MBR_KBPS / 1000.0)
+                n6_util = n6_total_mbps / max(args.n6_capacity_mbps, 1e-9)
+
+                obs = make_obs(offered, current_mbr, n6_util)
+
+                if last_obs is not None:
+                    done = 1.0 if episode_step == 0 else 0.0
+                    replay.add((last_obs, int(last_action), float(last_reward), obs, done))
+
+                eps = epsilon_by_step(args, step)
+                if random.random() < eps:
+                    action = random.randrange(len(ACTIONS))
+                else:
+                    with torch.no_grad():
+                        action = int(torch.argmax(q(torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0))).item())
+
+                prev_mbr = current_mbr.copy()
+                current_mbr = ACTION_MBR[action].copy()
+
+                rc = 0
+                out = "no_apply"
+                if not args.no_apply:
+                    rc, out = apply_mbr(current_mbr)
+
+                reward = compute_reward(pm, current_mbr, prev_mbr, n6_util)
+
+                train_loss = math.nan
+                if len(replay) >= max(args.batch_size, args.warmup_steps):
+                    s, a, r, ns, d = replay.sample(args.batch_size)
+                    s, a, r, ns, d = s.to(device), a.to(device), r.to(device), ns.to(device), d.to(device)
+                    qsa = q(s).gather(1, a.view(-1, 1)).squeeze(1)
+                    with torch.no_grad():
+                        y = r + args.gamma * (1.0 - d) * target(ns).max(dim=1).values
+                    loss = nn.functional.smooth_l1_loss(qsa, y)
+                    opt.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(q.parameters(), 5.0)
+                    opt.step()
+                    train_loss = float(loss.item())
+
+                if step > 0 and step % 25 == 0:
+                    target.load_state_dict(q.state_dict())
+
+                row = {
+                    "step": step,
+                    "episode": episode,
+                    "episode_step": episode_step,
+                    "t_s": float(sample.t_s),
+                    "regime": sample.regime,
+                    "action_id": action,
+                    "action_name": ACTIONS[action][0],
+                    "epsilon": eps,
+                    "reward": reward,
+                    "train_loss": train_loss,
+                    "offered_gold_mbps": offered.get("gold", 0.0),
+                    "offered_silver_mbps": offered.get("silver", 0.0),
+                    "offered_bronze_mbps": offered.get("bronze", 0.0),
+                    "noise_offered_mbps": offered.get("noise", 0.0),
+                    "mbr_gold_kbps": current_mbr[0],
+                    "mbr_silver_kbps": current_mbr[1],
+                    "mbr_bronze_kbps": current_mbr[2],
+                    "n6_total_mbps": n6_total_mbps,
+                    "n6_utilization": n6_util,
+                    "trex_total_tx_pkts": total_tx_pkts,
+                    "trex_total_rx_pkts": total_rx_pkts,
+                    "pfcp_modify_rc": rc,
+                    "pfcp_modify_output": out,
+                    **pm,
+                }
+
+                writer.writerow(row)
+                f_jsonl.write(json.dumps(json_safe(row)) + "\n")
+                f_jsonl.flush()
+                f_csv.flush()
+
+                episode_rewards.append(reward)
+                if not math.isnan(train_loss):
+                    episode_losses.append(train_loss)
+
+                if episode_step == args.episode_steps - 1:
+                    ep_row = {
+                        "episode": episode,
+                        "start_step": episode_start,
+                        "end_step": step,
+                        "reward_sum": float(np.sum(episode_rewards)),
+                        "reward_mean": float(np.mean(episode_rewards)),
+                        "loss_mean": float(np.mean(episode_losses)) if episode_losses else math.nan,
+                    }
+                    ep_writer.writerow(ep_row)
+                    f_ep.flush()
+                    episode_rewards.clear()
+                    episode_losses.clear()
+                    episode_start = step + 1
+
+                print(
+                    f"step={step:04d} ep={episode:03d} action={action:02d} {ACTIONS[action][0]} "
+                    f"mbr=({current_mbr[0]:.0f},{current_mbr[1]:.0f},{current_mbr[2]:.0f}) "
+                    f"gold_excess={pm['proxy_excess_gold_mbps']:.1f} "
+                    f"reward={reward:.2f} loss={train_loss if not math.isnan(train_loss) else 'nan'} "
+                    f"pfcp_rc={rc}"
+                )
+
+                last_obs = obs
+                last_action = action
+                last_reward = reward
+
+    finally:
+        try:
+            client.stop(ports=[args.port])
+        except Exception:
+            pass
+        client.disconnect()
+
+    print(f"Wrote CSV: {args.csv}")
+    print(f"Wrote JSONL: {args.jsonl}")
+    print(f"Wrote episodes CSV: {args.episodes_csv}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

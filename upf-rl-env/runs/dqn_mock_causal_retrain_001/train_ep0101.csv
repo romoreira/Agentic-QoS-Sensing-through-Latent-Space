@@ -1,0 +1,1 @@
+step,ts,offered_gold_mbps,offered_silver_mbps,offered_bronze_mbps,rx_gold_mbps,rx_silver_mbps,rx_bronze_mbps,loss_gold,loss_silver,loss_bronze,qer_red_gold,qer_red_silver,qer_red_bronze,n6_tx_mbps,n6_utilization,mbr_gold_kbps,mbr_silver_kbps,mbr_bronze_kbps,action,reward,regime,noise_offered_mbps,n6_capacity_mbps
