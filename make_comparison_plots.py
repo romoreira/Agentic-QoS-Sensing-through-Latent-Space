@@ -275,7 +275,7 @@ def fig3_shortage_per_episode(episodes: pd.DataFrame, out_dir: Path) -> None:
         x, mu, sd = agg[policy]
         c = POLICY_COLOR[policy]
         ax.plot(x, mu, label=policy, color=c, marker="o")
-        ax.fill_between(x, mu - sd, mu + sd, color=c, alpha=0.18, linewidth=0)
+        ax.fill_between(x, mu - sd, mu + sd, color=c, alpha=0.4, linewidth=0)
     style_axes(ax, xlabel="Episode", ylabel="Gold shortage sum (Mbps)")
     ax.legend(loc="upper right")
     save_pdf(fig, out_dir, "fig3_shortage_per_episode")
