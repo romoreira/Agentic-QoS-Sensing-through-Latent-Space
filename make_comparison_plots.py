@@ -3,15 +3,17 @@
 make_comparison_plots.py
 
 Generates 10 comparison plots between:
-  - Online DQN
+  - Online DQN Vanilla (obs-mode raw)
+  - Online DQN Latent  (obs-mode latent, frozen UNUM embedding)
   - Baseline fixed MBR
   - Baseline reactive threshold
 
 Reads:
-  <runs_root>/seed_*/metrics.csv               (DQN)
-  <runs_root>/seed_*/episodes.csv              (DQN)
-  <runs_root>/baseline_fixed/seed_*/...        (Fixed)
-  <runs_root>/baseline_reactive/seed_*/...     (Reactive)
+  <runs_root>/dqn_vanilla/seed_*/metrics.csv          (DQN Vanilla)
+  <runs_root>/dqn_vanilla/seed_*/episodes.csv         (DQN Vanilla)
+  <runs_root>/dqn_latent_space/seed_*/...             (DQN Latent)
+  <runs_root>/baseline_fixed/seed_*/...               (Fixed)
+  <runs_root>/baseline_reactive/seed_*/...            (Reactive)
 
 Writes (PDF only):
   <out_dir>/fig1_headline_comparison.pdf
@@ -27,7 +29,7 @@ Writes (PDF only):
 
 Usage:
   python3 make_comparison_plots.py \
-      --runs-root trex_4slice_noise_toolkit/runs/dqn_proxy_gold_100_200 \
+      --runs-root trex_4slice_noise_toolkit/runs/dqn_proxy_gold_100_200_1800s \
       --out-dir results
 """
 
@@ -86,24 +88,27 @@ mpl.rcParams.update(
 
 # Colorblind-safe palette (Wong 2011). One color per policy, kept consistent.
 POLICY_COLOR = {
-    "Fixed MBR":      "#D55E00",   # vermillion
-    "Reactive":       "#0072B2",   # blue
-    "DQN":   "#009E73",   # bluish green
+    "Fixed MBR":   "#D55E00",   # vermillion
+    "Reactive":    "#0072B2",   # blue
+    "DQN Vanilla": "#009E73",   # bluish green
+    "DQN Latent":  "#CC79A7",   # reddish purple
 }
-POLICY_ORDER = ["Fixed MBR", "Reactive", "DQN"]
+POLICY_ORDER = ["Fixed MBR", "Reactive", "DQN Vanilla", "DQN Latent"]
 
 # Marker per policy for scatter-style figures (Fig 10)
 POLICY_MARKER = {
-    "Fixed MBR":     "X",
-    "Reactive":      "s",
-    "DQN":  "o",
+    "Fixed MBR":   "X",
+    "Reactive":    "s",
+    "DQN Vanilla": "o",
+    "DQN Latent":  "D",
 }
 
 # Map on-disk folder layout -> display label
 POLICY_DIRS = {
-    "Fixed MBR":     "baseline_fixed",
-    "Reactive":      "baseline_reactive",
-    "DQN": None,  # DQN seeds live at the runs_root level
+    "Fixed MBR":   "baseline_fixed",
+    "Reactive":    "baseline_reactive",
+    "DQN Vanilla": "dqn_vanilla",
+    "DQN Latent":  "dqn_latent_space",
 }
 
 FIG_W, FIG_H = 7.0, 4.2  # inches: ACM single-column-ish proportions
@@ -313,24 +318,32 @@ def fig4_reward_per_episode(episodes: pd.DataFrame, out_dir: Path) -> None:
     save_pdf(fig, out_dir, "fig4_reward_per_episode")
 
 # ---------------------------------------------------------------------------
-# Figure 5 — DQN training loss across episodes
+# Figure 5 — DQN training loss across episodes (both DQN variants)
 # ---------------------------------------------------------------------------
 def fig5_dqn_training_loss(episodes: pd.DataFrame, out_dir: Path) -> None:
-    dqn = episodes[episodes.policy == "DQN"].copy()
-    dqn = dqn.dropna(subset=["loss_mean"])
-    if dqn.empty:
-        print("[warn] no DQN loss data; skipping fig5")
-        return
-    piv = dqn.pivot_table(index="episode", columns="seed", values="loss_mean").sort_index()
-
+    dqn_policies = [p for p in POLICY_ORDER if p.startswith("DQN")]
     fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
-    c = POLICY_COLOR["DQN"]
-    for col in piv.columns:
-        ax.plot(piv.index, piv[col], color=c, alpha=0.25, linewidth=1.2)
-    mu = piv.mean(axis=1).to_numpy()
-    sd = piv.std(axis=1, ddof=0).fillna(0).to_numpy()
-    ax.plot(piv.index, mu, color=c, marker="D", label="DQN")
-    ax.fill_between(piv.index, mu - sd, mu + sd, color=c, alpha=0.18, linewidth=0)
+
+    found_any = False
+    for policy in dqn_policies:
+        dqn = episodes[episodes.policy == policy].copy().dropna(subset=["loss_mean"])
+        if dqn.empty:
+            continue
+        found_any = True
+        piv = dqn.pivot_table(index="episode", columns="seed", values="loss_mean").sort_index()
+        c = POLICY_COLOR[policy]
+        m = POLICY_MARKER[policy]
+        for col in piv.columns:
+            ax.plot(piv.index, piv[col], color=c, alpha=0.25, linewidth=1.2)
+        mu = piv.mean(axis=1).to_numpy()
+        sd = piv.std(axis=1, ddof=0).fillna(0).to_numpy()
+        ax.plot(piv.index, mu, color=c, marker=m, label=policy)
+        ax.fill_between(piv.index, mu - sd, mu + sd, color=c, alpha=0.18, linewidth=0)
+
+    if not found_any:
+        print("[warn] no DQN loss data; skipping fig5")
+        plt.close(fig)
+        return
 
     style_axes(ax, xlabel="Episode", ylabel="DQN training loss (TD)")
     ax.legend(loc="upper right")
@@ -441,7 +454,7 @@ def fig7_dynamics_time_series(steps: pd.DataFrame, out_dir: Path,
             color=POLICY_COLOR[policy], linewidth=1.4, label=policy,
         )
     style_axes(ax_bot, xlabel="Time (s)", ylabel="Gold shortage (Mbps)")
-    ax_bot.legend(loc="upper right", ncol=3, fontsize=12)
+    ax_bot.legend(loc="upper right", ncol=4, fontsize=12)
 
     save_pdf(fig, out_dir, "fig7_dynamics_time_series")
 
@@ -488,7 +501,7 @@ def fig8_shortage_by_burst_regime(steps: pd.DataFrame, out_dir: Path) -> None:
     means = means[["Quiet", "Burst"]]
     stds = stds[["Quiet", "Burst"]]
 
-    fig, ax = plt.subplots(figsize=(FIG_W + 0.5, FIG_H))
+    fig, ax = plt.subplots(figsize=(FIG_W + 1.5, FIG_H))
     xs = np.arange(len(POLICY_ORDER))
     width = 0.36
 
@@ -638,8 +651,8 @@ def main() -> None:
     parser.add_argument(
         "--runs-root",
         type=Path,
-        default=Path("trex_4slice_noise_toolkit/runs/dqn_proxy_gold_100_200"),
-        help="Root directory containing seed_*/, baseline_fixed/, baseline_reactive/.",
+        default=Path("trex_4slice_noise_toolkit/runs/dqn_proxy_gold_100_200_1800s"),
+        help="Root directory containing dqn_vanilla/, dqn_latent_space/, baseline_fixed/, baseline_reactive/.",
     )
     parser.add_argument(
         "--out-dir",
