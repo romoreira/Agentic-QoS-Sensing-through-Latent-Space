@@ -10,7 +10,7 @@ mkdir -p ${ROOT}/embedder
 
 # (a) Pré-treinar o embedder UMA vez. Sem TRex, roda na própria máquina.
 #     Seeds de pré-treino são disjuntos dos de avaliação (7/13/21) para não vazar.
-python3 scripts/pretrain_embedder.py \
+python3 -u scripts/pretrain_embedder.py \
   --out ${ROOT}/embedder/embedder.pt \
   --log-csv ${ROOT}/embedder/pretrain_log.csv \
   --traffic-models sine_gold_safe_overload sine_overload latent_rich \
@@ -24,7 +24,7 @@ python3 scripts/pretrain_embedder.py \
 for SEED in 7 13 21; do
   SEED_PAD=$(printf "%03d" "$SEED")
   mkdir -p ${ROOT}/dqn_latent_space/seed_${SEED_PAD}
-  python3 scripts/run_proxy_experiment.py \
+  python3 -u scripts/run_proxy_experiment.py \
     --policy dqn --obs-mode latent \
     --env original --traffic-model sine_gold_safe_overload \
     --embedder ${ROOT}/embedder/embedder.pt \

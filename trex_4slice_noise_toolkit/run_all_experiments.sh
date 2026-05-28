@@ -87,7 +87,7 @@ fi
 # =============================================================================
 if [[ "${FORCE_PRETRAIN}" == "1" || ! -f "${EMB}" ]]; then
   echo "[pretrain] building embedder -> ${EMB}"
-  python3 "${SCRIPTS}/pretrain_embedder.py" \
+  python3 -u "${SCRIPTS}/pretrain_embedder.py" \
     --out "${EMB}" \
     --log-csv "${EMB_DIR}/pretrain_log.csv" \
     --traffic-models ${PRETRAIN_MODELS} \
@@ -108,7 +108,7 @@ run_one () {
   local subdir="$1"; shift
   local out="${ROOT}/${subdir}/seed_${SEED_PAD}"
   mkdir -p "${out}"
-  python3 "${SCRIPTS}/run_proxy_experiment.py" \
+  python3 -u "${SCRIPTS}/run_proxy_experiment.py" \
     ${ENV_FLAGS} ${TREX_FLAGS} \
     --duration "${DURATION}" --dt "${DT}" --episode-steps "${EPISODE_STEPS}" \
     --uplink-capacity-mbps "${CAP}" \
