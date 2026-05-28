@@ -292,17 +292,25 @@ def fig3_shortage_per_episode(episodes: pd.DataFrame, out_dir: Path) -> None:
 def fig4_reward_per_episode(episodes: pd.DataFrame, out_dir: Path) -> None:
     agg = aggregate_over_seeds(episodes, x_col="episode", y_col="reward_mean")
     fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    
     for policy in POLICY_ORDER:
         if policy not in agg:
             continue
         x, mu, sd = agg[policy]
         c = POLICY_COLOR[policy]
-        ax.plot(x, mu, label=policy, color=c, marker="s")
+        
+        # Pega o marcador específico da política no dicionário
+        m = POLICY_MARKER.get(policy, "o")
+        
+        ax.plot(x, mu, label=policy, color=c, marker=m)
         ax.fill_between(x, mu - sd, mu + sd, color=c, alpha=0.18, linewidth=0)
+        
     style_axes(ax, xlabel="Episode", ylabel="Mean reward per step")
-    ax.legend(loc="lower right")
+    
+    # Legenda mantida no canto inferior direito, agora com 40% de opacidade no fundo
+    ax.legend(loc="lower right", framealpha=0.4)
+    
     save_pdf(fig, out_dir, "fig4_reward_per_episode")
-
 
 # ---------------------------------------------------------------------------
 # Figure 5 — DQN training loss across episodes
