@@ -534,9 +534,9 @@ def fig8_shortage_by_burst_regime(steps: pd.DataFrame, out_dir: Path) -> None:
     thr = int(BURST_THRESHOLD_MBPS)
     legend_handles = [
         Patch(facecolor="0.45", alpha=0.45, edgecolor="black", linewidth=0.8,
-              hatch="", label=f"Quiet  (hidden burst < {thr} Mbps)"),
+              hatch="", label=f"Quiet"),
         Patch(facecolor="0.45", alpha=1.0, edgecolor="black", linewidth=0.8,
-              hatch="//", label=f"Burst  (hidden burst \u2265 {thr} Mbps)"),
+              hatch="//", label=f"Burst"),
     ]
     ax.legend(
         handles=legend_handles,
@@ -565,7 +565,8 @@ def fig9_protection_score_cdf(steps: pd.DataFrame, out_dir: Path) -> None:
     ax.set_ylim(0, 1.005)
     style_axes(ax, xlabel="Gold protection score (1 \u2212 shortage / offered)",
                ylabel="Empirical CDF")
-    ax.legend(loc="upper left")
+    #ax.legend(loc="upper left")
+    ax.legend(loc="upper right", framealpha=0.4)
     save_pdf(fig, out_dir, "fig9_protection_score_cdf")
 
 
