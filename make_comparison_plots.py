@@ -493,19 +493,22 @@ def fig8_shortage_by_burst_regime(steps: pd.DataFrame, out_dir: Path) -> None:
     width = 0.36
 
     # Each policy keeps its own hue; the two regimes are encoded by
-    # alpha (light = quiet, solid = burst).
+    # alpha (light = quiet, solid = burst) AND hatch (none = quiet, // = burst).
     policy_face = [POLICY_COLOR[p] for p in POLICY_ORDER]
 
+    # Barra Quiet: sem textura (hatch="")
     b1 = ax.bar(
         xs - width / 2, means["Quiet"].values, width=width,
         yerr=stds["Quiet"].values, color=policy_face, alpha=0.45,
-        edgecolor="black", linewidth=0.8, capsize=5,
+        edgecolor="black", linewidth=0.8, capsize=5, hatch="",
         error_kw={"elinewidth": 1.0, "ecolor": "0.2"},
     )
+    
+    # Barra Burst: com textura listrada diagonal (hatch="//")
     b2 = ax.bar(
         xs + width / 2, means["Burst"].values, width=width,
         yerr=stds["Burst"].values, color=policy_face, alpha=1.0,
-        edgecolor="black", linewidth=0.8, capsize=5,
+        edgecolor="black", linewidth=0.8, capsize=5, hatch="//",
         error_kw={"elinewidth": 1.0, "ecolor": "0.2"},
     )
 
@@ -527,14 +530,13 @@ def fig8_shortage_by_burst_regime(steps: pd.DataFrame, out_dir: Path) -> None:
     # Extra headroom so the inside legend never collides with the tall bar
     ax.set_ylim(0, all_top * 1.45)
 
-    # Neutral legend chips: hue is reserved for policy identity, so the
-    # legend only conveys what changes between regimes (alpha = saturation).
+    # Neutral legend chips updated to reflect the new hatches
     thr = int(BURST_THRESHOLD_MBPS)
     legend_handles = [
         Patch(facecolor="0.45", alpha=0.45, edgecolor="black", linewidth=0.8,
-              label=f"Quiet  (hidden burst < {thr} Mbps)"),
+              hatch="", label=f"Quiet  (hidden burst < {thr} Mbps)"),
         Patch(facecolor="0.45", alpha=1.0, edgecolor="black", linewidth=0.8,
-              label=f"Burst  (hidden burst \u2265 {thr} Mbps)"),
+              hatch="//", label=f"Burst  (hidden burst \u2265 {thr} Mbps)"),
     ]
     ax.legend(
         handles=legend_handles,
@@ -543,8 +545,6 @@ def fig8_shortage_by_burst_regime(steps: pd.DataFrame, out_dir: Path) -> None:
         handlelength=1.4, handleheight=1.0, borderpad=0.5,
     )
     save_pdf(fig, out_dir, "fig8_shortage_by_burst_regime")
-
-
 # ---------------------------------------------------------------------------
 # Figure 9 — CDF of Gold Protection Score
 # ---------------------------------------------------------------------------
