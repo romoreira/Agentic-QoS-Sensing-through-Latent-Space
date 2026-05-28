@@ -88,22 +88,22 @@ mpl.rcParams.update(
 POLICY_COLOR = {
     "Fixed MBR":      "#D55E00",   # vermillion
     "Reactive":       "#0072B2",   # blue
-    "DQN (online)":   "#009E73",   # bluish green
+    "DQN":   "#009E73",   # bluish green
 }
-POLICY_ORDER = ["Fixed MBR", "Reactive", "DQN (online)"]
+POLICY_ORDER = ["Fixed MBR", "Reactive", "DQN"]
 
 # Marker per policy for scatter-style figures (Fig 10)
 POLICY_MARKER = {
     "Fixed MBR":     "X",
     "Reactive":      "s",
-    "DQN (online)":  "o",
+    "DQN":  "o",
 }
 
 # Map on-disk folder layout -> display label
 POLICY_DIRS = {
     "Fixed MBR":     "baseline_fixed",
     "Reactive":      "baseline_reactive",
-    "DQN (online)": None,  # DQN seeds live at the runs_root level
+    "DQN": None,  # DQN seeds live at the runs_root level
 }
 
 FIG_W, FIG_H = 7.0, 4.2  # inches: ACM single-column-ish proportions
@@ -303,7 +303,7 @@ def fig4_reward_per_episode(episodes: pd.DataFrame, out_dir: Path) -> None:
 # Figure 5 — DQN training loss across episodes
 # ---------------------------------------------------------------------------
 def fig5_dqn_training_loss(episodes: pd.DataFrame, out_dir: Path) -> None:
-    dqn = episodes[episodes.policy == "DQN (online)"].copy()
+    dqn = episodes[episodes.policy == "DQN"].copy()
     dqn = dqn.dropna(subset=["loss_mean"])
     if dqn.empty:
         print("[warn] no DQN loss data; skipping fig5")
@@ -311,7 +311,7 @@ def fig5_dqn_training_loss(episodes: pd.DataFrame, out_dir: Path) -> None:
     piv = dqn.pivot_table(index="episode", columns="seed", values="loss_mean").sort_index()
 
     fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
-    c = POLICY_COLOR["DQN (online)"]
+    c = POLICY_COLOR["DQN"]
     for col in piv.columns:
         ax.plot(piv.index, piv[col], color=c, alpha=0.25, linewidth=1.2)
     mu = piv.mean(axis=1).to_numpy()
