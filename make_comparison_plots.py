@@ -329,7 +329,7 @@ def fig5_dqn_training_loss(episodes: pd.DataFrame, out_dir: Path) -> None:
         ax.plot(piv.index, piv[col], color=c, alpha=0.25, linewidth=1.2)
     mu = piv.mean(axis=1).to_numpy()
     sd = piv.std(axis=1, ddof=0).fillna(0).to_numpy()
-    ax.plot(piv.index, mu, color=c, marker="D", label="DQN (mean over seeds)")
+    ax.plot(piv.index, mu, color=c, marker="D", label="DQN")
     ax.fill_between(piv.index, mu - sd, mu + sd, color=c, alpha=0.18, linewidth=0)
 
     style_axes(ax, xlabel="Episode", ylabel="DQN training loss (TD)")
