@@ -269,19 +269,23 @@ def fig2_shortage_cdf(steps: pd.DataFrame, out_dir: Path) -> None:
 def fig3_shortage_per_episode(episodes: pd.DataFrame, out_dir: Path) -> None:
     agg = aggregate_over_seeds(episodes, x_col="episode", y_col="gold_shortage_sum")
     fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    
     for policy in POLICY_ORDER:
         if policy not in agg:
             continue
         x, mu, sd = agg[policy]
         c = POLICY_COLOR[policy]
-        ax.plot(x, mu, label=policy, color=c, marker="o")
+        
+        # Pega o marcador específico da política (usa bolinha "o" como padrão se não achar)
+        m = POLICY_MARKER.get(policy, "o") 
+        
+        # Passa a variável 'm' para o parâmetro marker
+        ax.plot(x, mu, label=policy, color=c, marker=m) 
         ax.fill_between(x, mu - sd, mu + sd, color=c, alpha=0.18, linewidth=0)
-
+        
     style_axes(ax, xlabel="Episode", ylabel="Gold shortage sum (Mbps)")
     ax.legend(loc="upper right", framealpha=0.4)
     save_pdf(fig, out_dir, "fig3_shortage_per_episode")
-
-
 # ---------------------------------------------------------------------------
 # Figure 4 — Per-episode mean reward
 # ---------------------------------------------------------------------------
