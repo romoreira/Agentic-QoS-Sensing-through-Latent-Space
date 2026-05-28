@@ -340,6 +340,18 @@ def fig5_dqn_training_loss(episodes: pd.DataFrame, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Figure 6 — Action distribution per policy (stacked %)
 # ---------------------------------------------------------------------------
+# Dicionário com os nomes formatados para a legenda
+ACTION_LABELS = {
+    "nominal": "Nominal",
+    "cut_non_gold_light": "Cut Non-Gold (Light)",
+    "cut_non_gold_medium": "Cut Non-Gold (Medium)",
+    "cut_non_gold_strong": "Cut Non-Gold (Strong)",
+    "reserve_gold_light": "Reserve Gold (Light)",
+    "reserve_gold_strong": "Reserve Gold (Strong)",
+    "restore_silver": "Restore Silver",
+    "restore_bronze": "Restore Bronze",
+}
+
 def fig6_action_distribution(steps: pd.DataFrame, out_dir: Path) -> None:
     action_order = [
         "nominal",
@@ -365,10 +377,15 @@ def fig6_action_distribution(steps: pd.DataFrame, out_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(FIG_W + 1.6, FIG_H))
     bottom = np.zeros(len(pct.index))
     xs = np.arange(len(pct.index))
+    
     for action in actions_present:
         vals = pct[action].to_numpy()
+        
+        # Pega o nome formatado no dicionário (faz fallback para o nome original se não encontrar)
+        pretty_label = ACTION_LABELS.get(action, action) 
+        
         ax.bar(
-            xs, vals, bottom=bottom, label=action,
+            xs, vals, bottom=bottom, label=pretty_label,
             color=action_colors[action], edgecolor="white", linewidth=0.6, width=0.65,
         )
         bottom = bottom + vals
@@ -377,13 +394,12 @@ def fig6_action_distribution(steps: pd.DataFrame, out_dir: Path) -> None:
     ax.set_xticklabels(pct.index)
     ax.set_ylim(0, 100)
     style_axes(ax, xlabel="Policy", ylabel="Action usage (%)")
+    
     ax.legend(
         loc="center left", bbox_to_anchor=(1.01, 0.5),
         frameon=False, fontsize=12, handlelength=1.3,
     )
     save_pdf(fig, out_dir, "fig6_action_distribution")
-
-
 # ---------------------------------------------------------------------------
 # Figure 7 — Dynamic time series for one representative seed
 # ---------------------------------------------------------------------------
