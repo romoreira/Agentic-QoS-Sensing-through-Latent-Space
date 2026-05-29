@@ -1,0 +1,10 @@
+### Summary Table — per-policy aggregate metrics
+
+| policy    | n_seeds | mean_shortage_mbps | std_shortage_mbps | p50_shortage_mbps | p90_shortage_mbps | p95_shortage_mbps | p99_shortage_mbps | mean_reward_per_step | mean_protection_score | pct_improvement_vs_fixed |
+| --------- | ------- | ------------------ | ----------------- | ----------------- | ----------------- | ----------------- | ----------------- | -------------------- | --------------------- | ------------------------ |
+| Fixed MBR | 3       | 133.06             | 1.8               | 131.14            | 190.44            | 196.21            | 200.0             | -2713.071            | 0.1118                | 0.0                      |
+| Reactive  | 3       | 42.9               | 2.21              | 45.46             | 89.24             | 100.28            | 112.41            | -941.368             | 0.701                 | 67.76                    |
+| DQN       | 3       | 37.15              | 3.09              | 19.22             | 102.22            | 126.99            | 167.36            | -829.828             | 0.7909                | 72.08                    |
+| DQN-LS    | 3       | 34.73              | 1.73              | 18.37             | 96.56             | 125.38            | 171.35            | -781.882             | 0.8041                | 73.9                     |
+
+_Aggregates: mean ± std are cross-seed; tail percentiles are the mean of per-seed quantiles; `pct_improvement_vs_fixed` is the relative reduction in mean shortage compared to Fixed MBR. With n=3 seeds, treat all uncertainties as descriptive._
