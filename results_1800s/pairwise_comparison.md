@@ -1,0 +1,12 @@
+### Pairwise Comparison — paired-by-seed effect sizes on mean Gold shortage
+
+| treatment | control   | n_seeds | mean_delta_mbps | std_delta_mbps | cohen_d_paired | seeds_treatment_wins | seeds_tied | pct_improvement |
+| --------- | --------- | ------- | --------------- | -------------- | -------------- | -------------------- | ---------- | --------------- |
+| DQN-LS    | DQN       | 3       | -2.25           | 0.97           | -2.307         | 3/3                  | 0          | 6.93            |
+| DQN-LS    | Reactive  | 3       | -11.55          | 0.7            | -16.576        | 3/3                  | 0          | 27.66           |
+| DQN-LS    | Fixed MBR | 3       | -104.59         | 0.5            | -207.693       | 3/3                  | 0          | 77.59           |
+| DQN       | Reactive  | 3       | -9.3            | 0.7            | -13.289        | 3/3                  | 0          | 22.27           |
+| DQN       | Fixed MBR | 3       | -102.34         | 0.82           | -124.261       | 3/3                  | 0          | 75.92           |
+| Reactive  | Fixed MBR | 3       | -93.04          | 0.23           | -407.713       | 3/3                  | 0          | 69.02           |
+
+_delta = mean_shortage(treatment) - mean_shortage(control). Negative delta -> treatment protects Gold better. `seeds_treatment_wins = k/n` is the count of seeds where the treatment had lower mean shortage. Cohen's d is paired and *descriptive only* given n=3: with such a small sample, inferential tests (Wilcoxon paired, paired t) are underpowered and are deliberately not reported._
