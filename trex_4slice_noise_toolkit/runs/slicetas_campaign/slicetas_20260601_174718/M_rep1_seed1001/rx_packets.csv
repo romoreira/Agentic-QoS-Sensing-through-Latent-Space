@@ -1,0 +1,2 @@
+idx,ts,rel_ts,src_ip,dst_ip,udp_sport,udp_dport,class_name,length
+# pcap_read_error,[Errno 2] No such file or directory: '/home/ubuntu/Agentic-QoS-Sensing-through-Latent-Space/trex_4slice_noise_toolkit/runs/slicetas_campaign/slicetas_20260601_174718/M_rep1_seed1001/rx.pcap'
